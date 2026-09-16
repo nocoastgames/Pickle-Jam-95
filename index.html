@@ -87,6 +87,15 @@ const Audio90 = (function () {
   let timerId = null, nextTime = 0, step16 = 0, bar = 0;
   const LOOKAHEAD = 0.12, TICK_MS = 25;
 
+  /* ---- live radio (SomaFM) ----
+     Each preset has a real station AND a built-in synth tape. The tape plays
+     immediately and keeps playing until the stream actually connects, so the
+     game never sits in silence — and still works with no internet at all. */
+  let el = null, elSrc = null, streamGain, anal, freqData;
+  let live = true, status = 'OFF', np = '', wd = null, npTimer = null;
+  let hostIdx = 0, tries = 0;
+  const HOSTS = ['ice6', 'ice2', 'ice5', 'ice4', 'ice1'];
+
   const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
 
   /* ---------- setup ---------- */
@@ -115,13 +124,90 @@ const Audio90 = (function () {
     noiseBuf = ac.createBuffer(1, n, ac.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+
+    // Live-stream chain. An <audio> element can only ever be turned into a
+    // MediaElementAudioSourceNode once, so build both exactly here and only
+    // ever swap .src afterwards.
+    streamGain = ac.createGain(); streamGain.gain.value = 1.0;
+    anal = ac.createAnalyser(); anal.fftSize = 64;
+    freqData = new Uint8Array(anal.frequencyBinCount);
+    streamGain.connect(anal); anal.connect(musicBus);
+    try {
+      el = new Audio();
+      el.crossOrigin = 'anonymous';   // SomaFM sends ACAO:* so the analyser stays live
+      el.preload = 'none';
+      elSrc = ac.createMediaElementSource(el);
+      elSrc.connect(streamGain);
+      el.addEventListener('playing', () => { status = 'LIVE'; tries = 0; clearTimeout(wd); pollNP(); });
+      el.addEventListener('error', () => nextHost());
+      el.addEventListener('ended', () => nextHost());
+      el.addEventListener('stalled', () => armWatchdog(6000));
+      el.addEventListener('waiting', () => armWatchdog(9000));
+    } catch (e) { el = null; }
+  }
+
+  /* ---- stream control ---- */
+  function stopStream() {
+    clearTimeout(wd);
+    if (!el) return;
+    try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) { }
+  }
+  function armWatchdog(ms) {
+    clearTimeout(wd);
+    wd = setTimeout(() => {
+      if (!el || el.paused || el.readyState < 3) nextHost();
+    }, ms);
+  }
+  function toTape() {                       // give up on the stream, run the synth
+    status = STATIONS[station].play ? 'TAPE' : 'OFF';
+    np = ''; tries = 0; stopStream();
+  }
+  function nextHost() {
+    // only retry while we're genuinely mid-connect: tearing a stream down calls
+    // load() on an empty src, which itself fires 'error' and would loop forever
+    if (status !== 'TUNING' || !live) return;
+    tries++;
+    if (tries >= 3) { toTape(); return; }       // ~20s worst case, tape covers it
+    hostIdx = (hostIdx + 1) % HOSTS.length;
+    startStream(true);
+  }
+  function startStream(retry) {
+    const st = STATIONS[station];
+    if (!el || !live || !st.soma || muted) { if (!retry) toTape(); return; }
+    if (!retry) { tries = 0; np = ''; }
+    status = 'TUNING';
+    try {
+      el.src = 'https://' + HOSTS[hostIdx] + '.somafm.com/' + st.soma + '-128-mp3';
+      el.load();
+      const p = el.play();
+      if (p && p.catch) p.catch(() => nextHost());
+    } catch (e) { nextHost(); return; }
+    armWatchdog(7000);
+  }
+  async function pollNP() {
+    const st = STATIONS[station];
+    if (!st.soma || status !== 'LIVE') { np = ''; return; }
+    try {
+      const r = await fetch('https://somafm.com/songs/' + st.soma + '.json', { cache: 'no-store' });
+      const d = await r.json();
+      const s = d && d.songs && d.songs[0];
+      np = (s && s.artist) ? (s.artist + ' — ' + s.title) : '';
+    } catch (e) { np = ''; }
   }
 
   function resume() {
     init();
     if (!ac) return;
     if (ac.state === 'suspended') ac.resume();
-    if (!started) { started = true; nextTime = ac.currentTime + 0.08; step16 = 0; bar = 0; run(); }
+    if (!started) {
+      started = true; nextTime = ac.currentTime + 0.08; step16 = 0; bar = 0; run();
+      // we finally have a user gesture, so the stream is allowed to start
+      const st = STATIONS[station];
+      if (!st.play) status = 'OFF';
+      else if (live && st.soma && !muted) startStream(false);
+      else status = 'TAPE';
+      if (!npTimer) npTimer = setInterval(pollNP, 20000);
+    }
   }
 
   /* ---------- primitive voices ---------- */
@@ -230,7 +316,8 @@ const Audio90 = (function () {
   const STATIONS = [
     { name: 'STATIC', dial: '--.-', genre: 'RADIO OFF', color: '#888', bpm: 100, play: null },
 
-    { name: 'KRUD', dial: '104.5', genre: 'GRUNGE / ALT', color: '#8dff3a', bpm: 94, dly: 0.18,
+    { name: 'KRUD', dial: '104.5', genre: 'ALT ROCK', color: '#8dff3a', bpm: 94, dly: 0.18,
+      soma: 'indiepop', somaName: 'Indie Pop Rocks!',
       prog: [40, 45, 43, 38],
       play(s, t, b) {
         const r = this.prog[b % 4];
@@ -251,7 +338,8 @@ const Audio90 = (function () {
       }
     },
 
-    { name: 'JAMZ', dial: '92.3', genre: 'HIP-HOP / R&B', color: '#ffa63d', bpm: 88, dly: 0.26,
+    { name: 'JAMZ', dial: '92.3', genre: 'BEATS / TRIP-HOP', color: '#ffa63d', bpm: 88, dly: 0.26,
+      soma: 'fluid', somaName: 'Fluid',
       prog: [48, 48, 46, 43],
       play(s, t, b) {
         const r = this.prog[b % 4];
@@ -273,7 +361,8 @@ const Audio90 = (function () {
       }
     },
 
-    { name: 'PULSE', dial: '99.7', genre: 'EURODANCE', color: '#00f0ff', bpm: 138, dly: 0.217,
+    { name: 'PULSE', dial: '99.7', genre: 'HOUSE / TRANCE', color: '#00f0ff', bpm: 138, dly: 0.217,
+      soma: 'thetrip', somaName: 'The Trip',
       prog: [45, 41, 48, 43],
       play(s, t, b) {
         const r = this.prog[b % 4];
@@ -294,7 +383,8 @@ const Audio90 = (function () {
       }
     },
 
-    { name: 'WAVE', dial: '88.1', genre: 'NEW JACK SWING', color: '#ff2e97', bpm: 112, dly: 0.2,
+    { name: 'WAVE', dial: '88.1', genre: 'NEW WAVE', color: '#ff2e97', bpm: 112, dly: 0.2,
+      soma: 'u80s', somaName: 'Underground 80s',
       prog: [53, 52, 50, 55],
       play(s, t, b) {
         const r = this.prog[b % 4];
@@ -312,6 +402,26 @@ const Audio90 = (function () {
         if (b % 4 === 3 && [0, 4, 7, 10, 13].indexOf(s) >= 0)
           tone(t, r + 12 + [0, 3, 5, 7, 5][[0, 4, 7, 10, 13].indexOf(s)], .34, 'sawtooth', .075, 1500, musicBus);
       }
+    },
+
+    { name: 'VHS', dial: '101.3', genre: 'VAPORWAVE', color: '#b06bff', bpm: 68, dly: 0.36,
+      soma: 'vaporwaves', somaName: 'Vaporwaves',
+      prog: [53, 51, 49, 54],
+      play(s, t, b) {
+        const r = this.prog[b % 4];
+        if (s === 0 || s === 11) kick(t, .8, 120, 40, .45);
+        if (s === 8) snare(t, .4, true);
+        if (s === 4 || s === 12) hat(t, false, .1);
+        if (s === 14) hat(t, true, .07);
+        if (s === 0) tone(t, r - 24, .8, 'sine', .4, 240);
+        if (s === 9) tone(t, r - 24 + 5, .4, 'sine', .28, 240);
+        // washed-out major 9 chords, drenched in delay
+        if (s === 0 || s === 8) [0, 4, 7, 11, 14].forEach(iv => epiano(t, r + iv, 1.6, .075));
+        if (s === 6) [0, 4, 7].forEach(iv => epiano(t, r + iv + 2, .9, .05));
+        // that slow, wistful lead
+        if (b % 2 === 1 && (s === 2 || s === 7 || s === 12))
+          tone(t, r + 12 + [0, 4, 2][[2, 7, 12].indexOf(s)], .9, 'triangle', .07, 1200);
+      }
     }
   ];
 
@@ -323,7 +433,8 @@ const Audio90 = (function () {
       const st = STATIONS[station];
       const spb = 60 / (st.bpm || 110) / 4;
       while (nextTime < ac.currentTime + LOOKAHEAD) {
-        if (!muted && st.play) { try { st.play(step16, nextTime, bar); } catch (e) { } }
+        // the synth tape keeps rolling until the live stream is genuinely playing
+        if (!muted && st.play && status !== 'LIVE') { try { st.play(step16, nextTime, bar); } catch (e) { } }
         nextTime += spb;
         step16++;
         if (step16 >= 16) { step16 = 0; bar++; }
@@ -438,15 +549,37 @@ const Audio90 = (function () {
     get ready() { return !!ac && ac.state === 'running'; },
     setStation(i) {
       station = ((i % STATIONS.length) + STATIONS.length) % STATIONS.length;
+      const st = STATIONS[station];
+      np = ''; hostIdx = 0; tries = 0;
       if (ac) {
-        delay.delayTime.value = STATIONS[station].dly || 0.2;
+        delay.delayTime.value = st.dly || 0.2;
         step16 = 0; bar = 0; nextTime = ac.currentTime + 0.05;
         SFX.tune();
+        stopStream();
+        if (!st.play) { status = 'OFF'; }
+        else if (live && st.soma && !muted) startStream(false);
+        else status = 'TAPE';
+        if (!npTimer) npTimer = setInterval(pollNP, 20000);
       }
-      return STATIONS[station];
+      return st;
     },
     nextStation() { return this.setStation(station + 1); },
-    setMuted(m) { muted = m; if (musicBus) musicBus.gain.value = m ? 0 : 0.55; },
+    setLive(b) { live = !!b; this.setStation(station); },
+    get live() { return live; },
+    get status() { return status; },            // LIVE | TUNING | TAPE | OFF
+    get nowPlaying() { return np; },
+    get eq() {                                   // real spectrum while streaming
+      if (status !== 'LIVE' || !anal || muted) return null;
+      anal.getByteFrequencyData(freqData);
+      return freqData;
+    },
+    setMuted(m) {
+      muted = m;
+      if (musicBus) musicBus.gain.value = m ? 0 : 0.55;
+      // don't burn a classroom's bandwidth on a stream nobody can hear
+      if (m) { stopStream(); if (status === 'LIVE' || status === 'TUNING') status = 'TAPE'; }
+      else if (live && STATIONS[station].soma) startStream(false);
+    },
     get muted() { return muted; },
     duck(on) { if (musicBus && !muted) musicBus.gain.setTargetAtTime(on ? 0.18 : 0.55, ac.currentTime, .15); }
   };
@@ -1162,6 +1295,7 @@ const Art = (function () {
     { k: 'assist', label: 'TIMING ASSIST', vals: ['OFF', 'ON'], get: () => opt.assist ? 1 : 0, set: v => opt.assist = !!v },
     { k: 'pro', label: 'PRO RULES', vals: ['OFF', 'ON'], get: () => opt.proRules ? 1 : 0, set: v => opt.proRules = !!v },
     { k: 'radio', label: 'RADIO', vals: null, get: () => Audio90.station, set: v => Audio90.setStation(v) },
+    { k: 'livefm', label: 'LIVE RADIO', vals: ['OFF (BUILT-IN)', 'ON (SomaFM)'], get: () => Audio90.live ? 1 : 0, set: v => Audio90.setLive(!!v) },
     { k: 'fx', label: 'SCREEN FX', vals: ['REDUCED', 'FULL'], get: () => opt.fx ? 1 : 0, set: v => { opt.fx = !!v; document.body.classList.toggle('reduced', !opt.fx); } },
     { k: 'howto', label: '► HOW TO PLAY', vals: null },
     { k: 'start', label: '► START MATCH', vals: null }
@@ -1190,7 +1324,7 @@ const Art = (function () {
     menuAdjust(1);
   }
   // menu rows are clickable too — keep this in sync with drawMenu()
-  const MENU_TOP = 118, MENU_ROW = 42;
+  const MENU_TOP = 110, MENU_ROW = 38;
   function menuRowAt(lx, ly) {
     if (lx < 176 || lx > 784) return -1;
     const i = Math.floor((ly - MENU_TOP + 3) / MENU_ROW);
@@ -1550,26 +1684,60 @@ const Art = (function () {
 
   function drawRadio() {
     const st = Audio90.stations[Audio90.station];
-    const x = 16, y = 520, w = 250, h = 52;
+    const x = 16, y = 506, w = 286, h = 68;
     Art.panel(ctx, x, y, w, h, '#20103d', st.color);
-    Art.label(ctx, st.dial, x + 12, y + 18, 20, st.color, 'left');
-    Art.label(ctx, st.name, x + 74, y + 18, 20, '#fff', 'left');
-    Art.label(ctx, Audio90.muted ? 'MUTED — [N]' : st.genre, x + 12, y + 38, 14, '#c9a7ff', 'left');
-    // EQ bars
+    Art.label(ctx, st.dial, x + 12, y + 17, 20, st.color, 'left');
+    Art.label(ctx, st.name, x + 76, y + 17, 20, '#fff', 'left');
+
+    // on-air badge
+    const status = Audio90.status;
+    if (!Audio90.muted && status !== 'OFF') {
+      const badge = status === 'LIVE' ? 'LIVE' : (status === 'TUNING' ? 'TUNING' : 'TAPE');
+      const col = status === 'LIVE' ? '#ff3b3b' : (status === 'TUNING' ? '#ffe83d' : '#8f7ac0');
+      const blink = status === 'TUNING' ? (S.t * 4 % 1) < .55 : true;
+      if (blink) {
+        if (status === 'LIVE') { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x + w - 62, y + 12, 4.5, 0, 7); ctx.fill(); }
+        Art.label(ctx, badge, x + w - 12, y + 13, 14, col, 'right');
+      }
+    }
+    Art.label(ctx, Audio90.muted ? 'MUTED — [N]' : st.genre, x + 12, y + 36, 14, '#c9a7ff', 'left');
+
+    // now playing, scrolled if it doesn't fit
+    const npText = Audio90.muted ? '' : (Audio90.nowPlaying || (status === 'TUNING' ? 'TUNING IN…' : (st.play ? 'BACKUP TAPE' : '')));
+    if (npText) {
+      const cx = x + 10, cy = y + 52, cw = w - 20, ch = 14;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(cx, cy, cw, ch); ctx.clip();
+      ctx.font = '13px Impact, "Arial Black", sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(npText).width;
+      let ox = 0;
+      if (tw > cw) ox = -((S.t * 26) % (tw + 46));   // marquee
+      ctx.fillStyle = '#8dff3a';
+      ctx.fillText(npText, cx + ox, cy + ch / 2);
+      if (tw > cw) ctx.fillText(npText, cx + ox + tw + 46, cy + ch / 2);
+      ctx.restore();
+    }
+
+    // EQ — real spectrum when streaming, animated stand-in for the synth tape
+    const eq = Audio90.eq;
     for (let i = 0; i < 9; i++) {
-      const on = st.play && !Audio90.muted;
-      const hgt = on ? 4 + Math.abs(Math.sin(S.t * (5 + i * 0.7) + i)) * 17 : 3;
+      let hgt = 3;
+      if (!Audio90.muted && status !== 'OFF') {
+        if (eq) hgt = 3 + (eq[i * 2 + 1] / 255) * 18;
+        else hgt = 4 + Math.abs(Math.sin(S.t * (5 + i * 0.7) + i)) * 15;
+      }
       ctx.fillStyle = i % 3 === 0 ? st.color : '#ffffff';
       ctx.globalAlpha = .85;
-      ctx.fillRect(x + w - 104 + i * 11, y + h - 10 - hgt, 7, hgt);
+      ctx.fillRect(x + w - 112 + i * 11, y + 40 - hgt, 7, hgt);
     }
     ctx.globalAlpha = 1;
-    Art.label(ctx, '[M] TUNE', x + w - 12, y + 13, 12, '#8f7ac0', 'right');
+    Art.label(ctx, '[M]', x + w - 12, y + 32, 12, '#8f7ac0', 'right');
   }
 
   function drawServeMeter() {
     const sv = S.serving;
-    const x = 300, y = 546, w = 360, h = 26;
+    const x = 314, y = 546, w = 338, h = 26;
     Art.panel(ctx, x, y, w, h, '#150a28', '#ffe83d');
     const lo = opt.assist ? 0.30 : 0.36, hi = opt.assist ? 0.94 : 0.88;
     ctx.save();
@@ -1581,8 +1749,8 @@ const Art = (function () {
     ctx.fillStyle = '#000'; ctx.fillRect(mx - 1, y - 4, 2, h + 8);
     ctx.restore();
     const who = pl[sv].human ? (sv === 0 ? 'P1' : 'P2') : 'CPU';
-    Art.label(ctx, who + ' SERVES FROM THE ' + (serveSideOf(sv) > 0 ? 'RIGHT' : 'LEFT') +
-      (pl[sv].human ? ' — PRESS IN THE GREEN' : ''), 480, y - 14, 19, '#ffe83d');
+    Art.label(ctx, who + ' SERVE — ' + (serveSideOf(sv) > 0 ? 'RIGHT' : 'LEFT') + ' COURT' +
+      (pl[sv].human ? ' — PRESS IN THE GREEN' : ''), 483, y - 14, 16, '#ffe83d');
     // big arrow over the server so you know whose turn it is
     const q = proj(pl[sv].x, pl[sv].side * 21.8, 0);
     const bob = Math.sin(S.t * 6) * 5;
@@ -1720,11 +1888,14 @@ const Art = (function () {
       ['Only the SERVER can score. Lose the rally on serve = SIDE OUT.', '#fff'],
       ['Serve must clear the purple kitchen, diagonally. Deep is better.', '#fff'],
       ['PRO RULES: serve and return must bounce before anyone smacks it.', '#fff'],
-      ['No volleying while standing in the kitchen. Ever.', '#fff']
+      ['No volleying while standing in the kitchen. Ever.', '#fff'],
+      ['', ''],
+      ['[M] TUNES THE RADIO — 5 LIVE STATIONS', '#ffe83d'],
+      ['No signal? The built-in backup tape takes over automatically.', '#fff']
     ];
     lines.forEach((l, i) => {
       if (!l[0]) return;
-      Art.label(ctx, l[0], 480, 112 + i * 27, l[1] === '#ffe83d' ? 23 : 19, l[1]);
+      Art.label(ctx, l[0], 480, 100 + i * 24, l[1] === '#ffe83d' ? 22 : 18, l[1]);
     });
     Art.label(ctx, 'HOLD your button to go back', 480, 572, 20, '#ff2e97');
   }
