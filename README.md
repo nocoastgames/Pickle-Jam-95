@@ -13,7 +13,7 @@ Open `index.html`. That's it. It also runs fine from a double-click on the deskt
 
 | | Player 1 | Player 2 |
 |---|---|---|
-| Key | `A` (also `Q`, `Z`, `Shift`, `Space`) | `L` (also `P`, `/`, `Right Shift`) |
+| Key | `A` or `↑` (also `Q`, `Z`, `Shift`, `Space`) | `L` or `↓` (also `P`, `/`, `Right Shift`) |
 | Touch | left half of the screen | right half of the screen |
 | Gamepad | pad 1, any button | pad 2, any button |
 
@@ -29,12 +29,15 @@ SETUP & ACCESS if you want one-switch menus (tap = move down, hold = select).
 **Set this first.** One setting moves everything that governs difficulty, so you
 don't have to tune eight things per student.
 
-| Level | Swing | Speed | Auto-play | Repeat filter |
+| Level | Swing | Speed | Auto-play\* | Repeat filter |
 |---|---|---|---|---|
 | **EASIEST** | waits for the ball | 28% | on | 0.9s |
 | **EASY** | waits for the ball | 45% | on | 0.6s |
 | **STANDARD** | waits for the ball | 70% | off | 0.25s |
 | **CLASSIC** | must be timed | 100% | off | 0.11s |
+
+\* Auto-play only applies in NO-FAIL MATCH. In CO-OP and CLASSIC every hit needs a
+press, whatever the access level.
 
 The important one is **SWING: WAITS FOR BALL**. Normally a swing lasts a fraction
 of a second and you have to land it as the ball arrives. An armed swing holds the
@@ -118,10 +121,12 @@ reaction times. Everything below is in **SETUP & ACCESS**.
 - **Holding the switch down is safe.** A press registers on the way down, so a
   student who presses and keeps holding gets exactly one clean swing, not a
   stuck lob or a stream of swings.
-- **AUTO-PLAY HELP** swings for them at the last moment if no press comes, so a
-  student who cannot press — or simply doesn't this time — still sees a rally
-  continue rather than a loss. Their own press always takes priority. If nobody
-  serves, the game serves itself after twelve seconds.
+- **AUTO-PLAY HELP** (NO-FAIL MATCH only) swings for them at the last moment if no
+  press comes, so a student who cannot press still sees the rally continue rather
+  than a loss. Their own press always takes priority, and if nobody serves the game
+  serves itself after twelve seconds. **In CO-OP and CLASSIC a hit always has to be
+  earned with a press** — otherwise the game just rallies with itself while the
+  student watches.
 - **MENU CONTROL: TEACHER ONLY** keeps player buttons out of the options screen.
 - **Timing ring** (on by default) shows the ball's landing spot and when to press.
 - **Pressing early is never punished.** With an armed swing, a student can press

@@ -852,6 +852,7 @@ const Art = (function () {
   const keyMap = { 'KeyA': 0, 'ShiftLeft': 0, 'KeyQ': 0, 'KeyZ': 0, 'Space': 0, 'KeyL': 1, 'ShiftRight': 1, 'KeyP': 1, 'Slash': 1 };
 
   const lastAccept = [0, 0];
+  function inPlay() { return ['serve', 'rally', 'point', 'replay'].indexOf(S.mode) >= 0; }
   function press(i) {
     const b = btn[i];
     if (b.down) return;                       // already held — not a new press
@@ -875,8 +876,13 @@ const Art = (function () {
     if (e.code === 'Escape' || e.code === 'KeyO') { togglePause(); e.preventDefault(); return; }
     if (e.code === 'KeyM') { tuneRadio(); e.preventDefault(); return; }
     if (e.code === 'KeyN') { Audio90.setMuted(!Audio90.muted); e.preventDefault(); return; }
-    if (e.code === 'ArrowDown') { menuMove(1); e.preventDefault(); return; }
-    if (e.code === 'ArrowUp') { menuMove(-1); e.preventDefault(); return; }
+    // Up / Down double as the two players' switches during play, and still
+    // drive the menus everywhere else so the teacher keeps arrow navigation.
+    if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+      const up = e.code === 'ArrowUp';
+      if (inPlay()) press(up ? 0 : 1); else menuMove(up ? -1 : 1);
+      e.preventDefault(); return;
+    }
     if (e.code === 'ArrowRight') { menuAdjust(1); e.preventDefault(); return; }
     if (e.code === 'ArrowLeft') { menuAdjust(-1); e.preventDefault(); return; }
     if (e.code === 'Enter' || e.code === 'NumpadEnter') { Audio90.resume(); confirmAction(); e.preventDefault(); return; }
@@ -885,6 +891,9 @@ const Art = (function () {
     if (i !== undefined) { press(i); e.preventDefault(); }
   });
   addEventListener('keyup', e => {
+    // always release, even if the mode changed while the key was held
+    if (e.code === 'ArrowUp') { release(0); e.preventDefault(); return; }
+    if (e.code === 'ArrowDown') { release(1); e.preventDefault(); return; }
     const i = keyMap[e.code];
     if (i !== undefined) { release(i); e.preventDefault(); }
   });
@@ -1383,10 +1392,10 @@ const Art = (function () {
     }
     if (p.human) {
       if (btn[p.idx].pressed && p.swingT < 0 && p.cool <= 0) startSwing(p, false);
-      else if (opt.autoPlay && p.swingT < 0 && p.cool <= 0 && ball.live &&
+      else if (opt.autoPlay && opt.mode === 'nofail' && p.swingT < 0 && p.cool <= 0 && ball.live &&
                Math.sign(ball.vy) === p.side && ball.hitter !== p.idx) {
-        // last-second rescue so nobody loses the rally by not pressing.
-        // Their own press always comes first — this only fires if none came.
+        // Last-second rescue, NO-FAIL only. Everywhere else a hit has to be
+        // earned with a switch press, or the game just plays itself.
         const mustBounce = opt.proRules && S.shots < 3 && ball.bounces === 0;
         if (!mustBounce && timeToPlane(p.y) < 0.10) { startSwing(p, false); p.autoSwung = 1; }
       }
@@ -1417,7 +1426,7 @@ const Art = (function () {
     access: [
       { k: 'speed', label: 'GAME SPEED', vals: ['SLOWEST', 'SLOW', 'MEDIUM', 'NORMAL'], get: () => nearest(SPEEDS, opt.speed), set: v => opt.speed = SPEEDS[v] },
       { k: 'armed', label: 'SWING', vals: ['MUST BE TIMED', 'WAITS FOR BALL'], get: () => opt.armed ? 1 : 0, set: v => opt.armed = !!v },
-      { k: 'autoPlay', label: 'AUTO-PLAY HELP', vals: ['OFF', 'ON'], get: () => opt.autoPlay ? 1 : 0, set: v => opt.autoPlay = !!v },
+      { k: 'autoPlay', label: 'AUTO-PLAY HELP', vals: ['OFF', 'ON'], get: () => opt.autoPlay ? 1 : 0, set: v => opt.autoPlay = !!v, hide: () => opt.mode !== 'nofail' },
       { k: 'debounce', label: 'IGNORE FAST REPEATS', vals: ['OFF', '0.3s', '0.6s', '0.9s', '1.5s'], get: () => nearest(DEBOUNCES, opt.debounce), set: v => opt.debounce = DEBOUNCES[v] },
       { k: 'menuLock', label: 'MENU CONTROL', vals: ['ANY BUTTON', 'TEACHER ONLY'], get: () => opt.menuLock ? 1 : 0, set: v => opt.menuLock = !!v },
       { k: 'assist', label: 'TIMING RING', vals: ['OFF', 'ON'], get: () => opt.assist ? 1 : 0, set: v => opt.assist = !!v },
@@ -1550,7 +1559,7 @@ const Art = (function () {
       // outside CLASSIC the serve isn't a second timing puzzle: any press serves
       const easyServe = opt.mode !== 'classic';
       if (pl[sv].human && btn[sv].pressed) doServe(easyServe ? 0.72 : S.serveMeter);
-      else if (pl[sv].human && opt.autoPlay && S.serveWait > 12) doServe(0.72);
+      else if (pl[sv].human && opt.autoPlay && opt.mode === 'nofail' && S.serveWait > 12) doServe(0.72);
       else if (!pl[sv].human) updateAI(pl[sv], dt);
       if (S.mode === 'serve') {          // still winding up — ball rests in the server's hand
         ball.x = pl[sv].x * 0.94; ball.y = pl[sv].side * 21.4;
@@ -1683,7 +1692,7 @@ const Art = (function () {
   const SKIN = ['#f2c49b', '#8d5524'];
   function drawPlayer(p) {
     const q = proj(p.x, p.y, 0);
-    const s = q.s * 1.35;
+    const s = q.s * 2.1;
     const c1 = p.idx === 0 ? '#ff2e97' : '#8dff3a';
     const c2 = p.idx === 0 ? '#00f0ff' : '#ff8a1e';
     drawShadow(p.x, p.y, 0);
@@ -2181,8 +2190,8 @@ const Art = (function () {
 
     // player key reminders along the bottom edge
     if (['serve', 'rally', 'point'].indexOf(S.mode) >= 0) {
-      Art.label(ctx, 'P1 [A]', 84, 586, 18, '#ff2e97');
-      Art.label(ctx, opt.players === 2 ? 'P2 [L]' : 'CPU: ' + CPU_NAMES[opt.cpu], 876, 586, 18, '#8dff3a');
+      Art.label(ctx, 'P1 [A] or [↑]', 84, 586, 18, '#ff2e97');
+      Art.label(ctx, opt.players === 2 ? 'P2 [L] or [↓]' : 'CPU: ' + CPU_NAMES[opt.cpu], 876, 586, 18, '#8dff3a');
       Art.label(ctx, '[ESC] PAUSE', 480, 586, 15, '#6b4fa0');
     }
   }
