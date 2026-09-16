@@ -17,32 +17,63 @@ Open `index.html`. That's it. It also runs fine from a double-click on the deskt
 | Touch | left half of the screen | right half of the screen |
 | Gamepad | pad 1, any button | pad 2, any button |
 
-Menus are one-switch navigable: **tap** your button to move down, **hold** it to
-select. Arrow keys, `Enter` and the mouse work too.
+**Menus are teacher-only by default.** Arrow keys, `Enter`, and the mouse operate
+them; player buttons are ignored, so a student resting on their switch can't walk
+through the options and undo your setup. Change that with **MENU CONTROL** under
+SETUP & ACCESS if you want one-switch menus (tap = move down, hold = select).
 
 `M` tunes the radio · `N` mutes · `Esc` pauses
 
-## How one button plays pickleball
+## Access levels
 
-Your player runs to the ball on their own. The only thing you do is swing, and *when*
-you swing is the entire game.
+**Set this first.** One setting moves everything that governs difficulty, so you
+don't have to tune eight things per student.
 
-- **Tap** — drive the ball deep
-- **Hold** — lob it over their head
-- **Tap a low ball at the kitchen line** — dink it short
-- **Press when the shrinking ring meets the white circle** — perfect contact, a ZINGER
-- **Press early** and the ball goes one way, **late** and it goes the other — that's your aim
+| Level | Swing | Speed | Auto-play | Repeat filter |
+|---|---|---|---|---|
+| **EASIEST** | waits for the ball | 28% | on | 0.9s |
+| **EASY** | waits for the ball | 45% | on | 0.6s |
+| **STANDARD** | waits for the ball | 70% | off | 0.25s |
+| **CLASSIC** | must be timed | 100% | off | 0.11s |
 
-## The rules are the real ones
+The important one is **SWING: WAITS FOR BALL**. Normally a swing lasts a fraction
+of a second and you have to land it as the ball arrives. An armed swing holds the
+paddle out until the ball gets there — so a student can press *whenever*, seconds
+early or seconds late, and still connect. Reaction time stops being the thing the
+game measures. Pressing at the right moment still earns a ZINGER, so timing is a
+bonus rather than a requirement.
+
+It's a player accommodation only: the CPU still has to time its own swing, or
+neither side could ever miss and no point would ever be scored.
+
+## Game modes
+
+- **CO-OP RALLY** — no opponent and no score. Two players (or one player and the
+  CPU) keep the ball alive and count hits in a row, with a running team best.
+  Dropping it costs nothing: "GOOD TRY!", then straight into the next rally.
+- **NO-FAIL MATCH** — points are scored, but the student cannot fault. Their shots
+  always clear the net and land in, and the ball is aimed where the other player
+  can actually reach it. Simple rally scoring, no side-outs to explain.
+- **CLASSIC RULES** — the real game, unchanged: side-out scoring, the kitchen,
+  the double-bounce rule, serves that can sail long.
+
+In the two accessible modes the serve is not a second timing puzzle either — the
+meter is replaced by **PRESS YOUR BUTTON TO SERVE**, and any press serves well.
+
+## The rules are the real ones (in CLASSIC)
 
 - Side-out scoring: only the serving side can score. Lose the rally on your serve and
   it's a **side out** — the serve goes over, no point.
 - Serve underhand, diagonally, past the kitchen. Deeper is better, but overcook it and
   it sails long.
-- **Pro rules** (on by default): the serve and the return must both bounce before
-  anyone gets to smack it.
+- **Pro rules**: the serve and the return must both bounce before anyone gets to
+  smack it.
 - No volleying with your feet in the kitchen (the non-volley zone).
-- First to 11, win by 2. Also available at 7 and 15.
+- First to 11, win by 2. Also available at 5, 7 and 15.
+
+In CO-OP and NO-FAIL, tap/hold shot selection is dropped and the game picks a good
+shot for you, because a student who holds their switch down would otherwise lob
+every single ball.
 
 ## Radio stations
 
@@ -76,9 +107,25 @@ to run — if your class ends up using them, [consider donating](https://somafm.
 
 ## Accessibility
 
-- **One button per player** — playable with a single switch, and the menus are too.
-- **Timing assist** (on by default) adds the timing ring, the ball's landing marker
-  and a wider sweet spot.
+Built for students with significant physical and cognitive disabilities and slow
+reaction times. Everything below is in **SETUP & ACCESS**.
+
+- **One button per player**, and no reaction-time demand at all on the lower access
+  levels — see [Access levels](#access-levels).
+- **IGNORE FAST REPEATS** (0.6s by default) swallows switch chatter. A second press
+  arriving too soon after the first is treated as the same press, so tremor,
+  spasticity or a bounced switch never costs a rally.
+- **Holding the switch down is safe.** A press registers on the way down, so a
+  student who presses and keeps holding gets exactly one clean swing, not a
+  stuck lob or a stream of swings.
+- **AUTO-PLAY HELP** swings for them at the last moment if no press comes, so a
+  student who cannot press — or simply doesn't this time — still sees a rally
+  continue rather than a loss. Their own press always takes priority. If nobody
+  serves, the game serves itself after twelve seconds.
+- **MENU CONTROL: TEACHER ONLY** keeps player buttons out of the options screen.
+- **Timing ring** (on by default) shows the ball's landing spot and when to press.
+- **Pressing early is never punished.** With an armed swing, a student can press
+  before the opponent has even hit the ball and it still counts.
 - **Screen FX: REDUCED** turns off the scanlines, screen shake, flashes and the
   drifting VHS tracking bar.
 - Nothing relies on color alone; players are distinguished by position and shape.

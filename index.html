@@ -795,14 +795,42 @@ const Art = (function () {
 
   /* ---------------- options ---------------- */
   const opt = {
+    mode: 'nofail',      // coop | nofail | classic
+    access: 1,           // 0 easiest .. 3 classic
     players: 1,          // 1 = vs CPU, 2 = two humans
-    cpu: 1,              // 0 rookie 1 pro 2 all-star
+    cpu: 0,              // 0 rookie 1 pro 2 all-star
     assist: true,
-    proRules: true,      // double-bounce rule
+    proRules: false,     // double-bounce rule
     target: 11,
-    fx: true             // full motion / flash
+    fx: true,            // full motion / flash
+    speed: 0.45,         // simulation speed — everything moves in slow motion
+    armed: true,         // a swing WAITS for the ball instead of expiring
+    autoPlay: true,      // rescue swing if nobody presses
+    debounce: 600,       // ms — ignores repeated / involuntary presses
+    menuLock: true,      // player buttons can't operate menus — teacher sets up
+    simpleShots: true,   // ignore tap-vs-hold, pick a good shot for them
+    aimToPartner: true   // put the ball where the other player can reach it
   };
   const CPU_NAMES = ['ROOKIE', 'PRO', 'ALL-STAR'];
+  const MODE_NAMES = { coop: 'CO-OP RALLY', nofail: 'NO-FAIL MATCH', classic: 'CLASSIC RULES' };
+  const MODE_KEYS = ['coop', 'nofail', 'classic'];
+  const ACCESS_NAMES = ['EASIEST', 'EASY', 'STANDARD', 'CLASSIC'];
+
+  // Access levels bundle everything that makes the game reachable, so a teacher
+  // can change one setting instead of eight.
+  const ACCESS_PRESETS = [
+    { speed: .28, armed: 1, autoPlay: 1, debounce: 900, simpleShots: 1, aim: 1, pro: 0, cpu: 0 },
+    { speed: .45, armed: 1, autoPlay: 1, debounce: 600, simpleShots: 1, aim: 1, pro: 0, cpu: 0 },
+    { speed: .70, armed: 1, autoPlay: 0, debounce: 250, simpleShots: 0, aim: 0, pro: 0, cpu: 1 },
+    { speed: 1.0, armed: 0, autoPlay: 0, debounce: 110, simpleShots: 0, aim: 0, pro: 1, cpu: 1 }
+  ];
+  function applyAccess(l) {
+    opt.access = l < 0 ? 0 : l > 3 ? 3 : l;
+    const p = ACCESS_PRESETS[opt.access];
+    opt.speed = p.speed; opt.debounce = p.debounce; opt.cpu = p.cpu;
+    opt.armed = !!p.armed; opt.autoPlay = !!p.autoPlay;
+    opt.simpleShots = !!p.simpleShots; opt.aimToPartner = !!p.aim; opt.proRules = !!p.pro;
+  }
 
   /* ---------------- input ---------------- */
   const HOLD_MS = 340;
@@ -810,11 +838,18 @@ const Art = (function () {
   const btn = [mkBtn(), mkBtn()];
   const keyMap = { 'KeyA': 0, 'ShiftLeft': 0, 'KeyQ': 0, 'KeyZ': 0, 'Space': 0, 'KeyL': 1, 'ShiftRight': 1, 'KeyP': 1, 'Slash': 1 };
 
+  const lastAccept = [0, 0];
   function press(i) {
     const b = btn[i];
-    if (b.down) return;
-    b.down = true; b.t0 = performance.now(); b.pressed = true; b.holdFired = false;
+    if (b.down) return;                       // already held — not a new press
+    const now = performance.now();
+    b.down = true; b.t0 = now; b.holdFired = false;
     Audio90.resume();
+    // swallow switch chatter: a second press too soon after the last one is
+    // treated as the same press, so tremor doesn't cost them the rally
+    if (now - lastAccept[i] < opt.debounce) return;
+    lastAccept[i] = now;
+    b.pressed = true;
   }
   function release(i) {
     const b = btn[i];
@@ -886,7 +921,8 @@ const Art = (function () {
     msg: '', msgT: 0, msgSub: '',
     pointT: 0, replayT: 0, banner: '', bannerT: 0,
     winner: -1, menuIdx: 0, trail: [], lastPointWinner: 0,
-    serveMeter: 0, serveDir: 1, serveLocked: -1
+    serveMeter: 0, serveDir: 1, serveLocked: -1,
+    serveWait: 0, best: 0, page: 'main'
   };
 
   const ball = { x: 0, y: 18, z: 3, vx: 0, vy: 0, vz: 0, live: false, bounces: 0, hitter: 0, spin: 0 };
@@ -936,7 +972,8 @@ const Art = (function () {
     ball.x = sx * 0.94; ball.y = pl[sv].side * 21.4; ball.z = 3.2;
     ball.vx = ball.vy = ball.vz = 0; ball.live = false; ball.bounces = 0; ball.hitter = sv;
     S.shots = 0; S.rally = 0; S.trail.length = 0;
-    S.serveMeter = 0; S.serveDir = 1; S.serveLocked = -1;
+    S.serveMeter = 0; S.serveDir = 1; S.serveLocked = -1; S.serveWait = 0;
+    pl.forEach(p => p.autoSwung = 0);
     S.mode = 'serve';
   }
 
@@ -992,23 +1029,39 @@ const Art = (function () {
   }
 
   /* ---------------- hitting ---------------- */
-  function reachX() { return opt.assist ? 3.1 : 2.4; }
-  function reachY() { return opt.assist ? 2.9 : 2.2; }
+  // a waiting swing shouldn't then miss because the paddle drifted a foot wide
+  function reachX() { return opt.armed ? 4.6 : (opt.assist ? 3.1 : 2.4); }
+  function reachY() { return opt.armed ? 3.8 : (opt.assist ? 2.9 : 2.2); }
 
   // Contact happens when the ball reaches the paddle plane. How far into your
   // swing that moment lands is the whole game: SWING_IDEAL is the sweet spot.
-  const SWING_LIFE = 0.34, SWING_IDEAL = 0.15;
+  const SWING_IDEAL = 0.15;
   function swingTol() { return opt.assist ? 0.15 : 0.11; }
+  // An "armed" swing holds the paddle out until the ball arrives, so pressing
+  // early is never wrong. Reaction time stops being the thing being tested.
+  // It's a player accommodation — the CPU still has to time its own swing,
+  // otherwise neither side can ever miss and no point is ever scored.
+  function isArmed(p) { return opt.armed && p.human; }
+  function swingLife(p) { return isArmed(p) ? 8 : 0.34; }
 
   function tryContact(p, dt) {
     if (p.swingT < 0 || !ball.live) return;
     if (ball.hitter === p.idx) return;
-    if (p.swingDy0 <= 0) return;          // ball was already past us when we swung
     if (Math.sign(ball.y) !== p.side && Math.abs(ball.y) > 1.5) return;
 
     const dy = (p.y - ball.y) * p.side;   // >0 = still on its way in
-    if (dy > 0) return;                   // keep swinging, it hasn't got here yet
-    if (dy < -reachY()) return;           // it blew straight past
+    const inbound = Math.sign(ball.vy) === p.side;
+    if (dy > 0) {
+      // not here yet. Note that we watched it come, so a swing held out from
+      // before the opponent even hit still counts as a real swing.
+      if (inbound) p.sawApproach = true;
+      return;
+    }
+    if (!p.sawApproach) return;           // it was already past when we swung
+    if (dy < -reachY()) {                 // it blew straight past — a real whiff
+      p.swingT = -1; p.cool = Math.max(p.cool, 0.15);
+      return;
+    }
     const dx = ball.x - p.x;
     if (Math.abs(dx) > reachX()) return;
     if (ball.z > 7.6 || ball.z < -0.2) return;
@@ -1031,17 +1084,33 @@ const Art = (function () {
     const tol = swingTol();
     const tq = clamp(1 - Math.abs(p.swingT - SWING_IDEAL) / tol, 0, 1);
     const xq = clamp(1 - Math.abs(dx) / reachX(), 0, 1);
-    const q = clamp(tq * 0.68 + xq * 0.32, 0, 1);
-    const early = clamp((p.swingT - SWING_IDEAL) / tol, -1, 1);  // +1 early, -1 late
-    const held = p.swingHeld;
+    let q, early;
+    if (isArmed(p)) {
+      // the paddle waited for the ball, so an early press costs nothing.
+      // sharp timing is a bonus on top — never a requirement.
+      q = clamp(0.76 + tq * 0.24, 0, 1);
+      early = 0;
+    } else {
+      q = clamp(tq * 0.68 + xq * 0.32, 0, 1);
+      early = clamp((p.swingT - SWING_IDEAL) / tol, -1, 1);  // +1 early, -1 late
+    }
+    const held = opt.simpleShots ? false : p.swingHeld;
     const oSide = -p.side;
 
     S.shots++; S.rally++;
     ball.hitter = p.idx; ball.bounces = 0;
     p.lunge = 1; p.cool = 0.16;
 
-    // aim: timing error steers the ball left/right, mirrored per side
-    let aimX = clamp(early * 8.2 * p.side + rand(-1, 1) * (1.6 - q) * 0.8, -9.3, 9.3);
+    // aim: timing error steers the ball left/right, mirrored per side.
+    // In the accessible modes we instead place it near the other player, so the
+    // rally keeps going rather than ending on a shot nobody could reach.
+    let aimX;
+    if (opt.aimToPartner) {
+      const foe = pl[1 - p.idx];
+      aimX = clamp(foe.x + rand(-2.0, 2.0), -8.4, 8.4);
+    } else {
+      aimX = clamp(early * 8.2 * p.side + rand(-1, 1) * (1.6 - q) * 0.8, -9.3, 9.3);
+    }
 
     const nearKitchen = Math.abs(p.y) < 11.5;
     const low = ball.z < 2.6;
@@ -1069,7 +1138,8 @@ const Art = (function () {
 
     // A decent swing arcs the ball over the tape without changing where it lands:
     // stretch the flight time and re-solve, rather than just shoving vz up.
-    if (q >= 0.42) {
+    // outside CLASSIC nothing shanks: every shot clears the net and lands in
+    if (q >= 0.42 || opt.mode !== 'classic') {
       for (let i = 0; i < 8; i++) {
         const tn = -ball.y / ball.vy;
         if (tn <= 0) break;
@@ -1082,6 +1152,7 @@ const Art = (function () {
       ball.vz *= lerp(0.78, 1.0, q / 0.42);   // shanked — may well find the net
     }
 
+    p.swingT = -1;                      // swing spent; p.lunge carries the follow-through
     if (type === 'DINK') Audio90.sfx.dink(); else Audio90.sfx.pop(vol);
     if (type === 'ZINGER') { shout(pick(RAD), 'PERFECT TIMING'); S.flash = opt.fx ? .35 : 0; S.shake = opt.fx ? 6 : 0; }
     else if (type === 'LOB') shout('LOB CITY!');
@@ -1092,14 +1163,28 @@ const Art = (function () {
   function fault(loser, msg, sub) {
     if (S.mode === 'point' || S.mode === 'replay' || S.mode === 'gameover') return;
     ball.live = false;
-    S.lastPointWinner = 1 - loser;
+    const w = 1 - loser;
+    S.lastPointWinner = w;
+
+    // CO-OP: there is no loser. The streak simply starts over.
+    if (opt.mode === 'coop') {
+      if (S.rally > S.best) { S.best = S.rally; banner('★ NEW TEAM RECORD: ' + S.best + ' ★'); }
+      shout('GOOD TRY!', S.rally > 0 ? 'THAT RALLY: ' + S.rally : 'HERE WE GO AGAIN');
+      Audio90.sfx.cheer(S.rally >= 5);
+      S.mode = 'point'; S.pointT = 0;
+      return;
+    }
+
     shout(msg, sub || '');
     Audio90.sfx.whistle();
     setTimeout(() => Audio90.sfx.fault(), 180);
 
-    const w = 1 - loser;
     let gameOver = false;
-    if (w === S.serving) {
+    if (opt.mode === 'nofail') {
+      // plain rally scoring: win the rally, get the point. No side-outs to explain.
+      S.score[w]++; S.serving = w;
+      if (S.score[w] >= opt.target && S.score[w] - S.score[1 - w] >= 2) gameOver = true;
+    } else if (w === S.serving) {
       S.score[w]++;
       if (S.score[w] >= opt.target && S.score[w] - S.score[1 - w] >= 2) gameOver = true;
     } else {
@@ -1251,8 +1336,10 @@ const Art = (function () {
       if (tc < tb + 0.02) return;      // wait for the bounce
     }
     if (p.aiPlan < 0) {          // -1 = unplanned, 1 = waiting to swing, 2 = swung
-      const err = [0.10, 0.055, 0.026][opt.cpu];
-      const whiff = [0.10, 0.04, 0.012][opt.cpu];
+      // in CO-OP the CPU is a partner, not an opponent: it barely ever misses
+      const coop = opt.mode === 'coop';
+      const err = coop ? 0.02 : [0.10, 0.055, 0.026][opt.cpu];
+      const whiff = coop ? 0 : [0.10, 0.04, 0.012][opt.cpu];
       const spd = Math.hypot(ball.vx, ball.vy);
       const hard = 0.8 + spd / 50;        // fast balls are harder to time
       p.aiErr = rand(-err, err) * hard + (Math.random() < whiff ? rand(.22, .34) : 0);
@@ -1267,9 +1354,9 @@ const Art = (function () {
 
   function startSwing(p, held) {
     p.swingT = 0; p.swingHeld = !!held;
-    // remember whether the ball was still inbound — you can't hit what already passed
-    p.swingDy0 = ball.live ? (p.y - ball.y) * p.side : -1;
-    if (!ball.live || Math.sign(ball.vy) !== p.side) p.swingDy0 = -1;
+    // An armed swing can be started before the opponent has even hit. We can't
+    // judge it now, so watch for the ball approaching while the swing is held out.
+    p.sawApproach = false;
   }
 
   function updatePlayer(p, dt) {
@@ -1278,29 +1365,55 @@ const Art = (function () {
     if (p.swingT >= 0) {
       p.swingT += dt;
       if (p.human) p.swingHeld = btn[p.idx].down && (performance.now() - btn[p.idx].t0) > 150;
-      if (p.swingT > SWING_LIFE) { p.swingT = -1; p.cool = Math.max(p.cool, 0.12); }
+      if (p.swingT > swingLife(p)) { p.swingT = -1; p.cool = Math.max(p.cool, 0.12); }
     }
     if (p.human) {
       if (btn[p.idx].pressed && p.swingT < 0 && p.cool <= 0) startSwing(p, false);
+      else if (opt.autoPlay && p.swingT < 0 && p.cool <= 0 && ball.live &&
+               Math.sign(ball.vy) === p.side && ball.hitter !== p.idx) {
+        // last-second rescue so nobody loses the rally by not pressing.
+        // Their own press always comes first — this only fires if none came.
+        const mustBounce = opt.proRules && S.shots < 3 && ball.bounces === 0;
+        if (!mustBounce && timeToPlane(p.y) < 0.10) { startSwing(p, false); p.autoSwung = 1; }
+      }
     } else updateAI(p, dt);
     aimPosition(p, dt);
     tryContact(p, dt);
   }
 
   /* ---------------- menus (one-switch friendly) ---------------- */
-  const MENU = [
-    { k: 'players', label: 'PLAYERS', vals: ['1P vs CPU', '2 PLAYER'], get: () => opt.players - 1, set: v => opt.players = v + 1 },
-    { k: 'cpu', label: 'CPU LEVEL', vals: CPU_NAMES, get: () => opt.cpu, set: v => opt.cpu = v, hide: () => opt.players === 2 },
-    { k: 'target', label: 'GAME TO', vals: ['7', '11', '15'], get: () => [7, 11, 15].indexOf(opt.target), set: v => opt.target = [7, 11, 15][v] },
-    { k: 'assist', label: 'TIMING ASSIST', vals: ['OFF', 'ON'], get: () => opt.assist ? 1 : 0, set: v => opt.assist = !!v },
-    { k: 'pro', label: 'PRO RULES', vals: ['OFF', 'ON'], get: () => opt.proRules ? 1 : 0, set: v => opt.proRules = !!v },
-    { k: 'radio', label: 'RADIO', vals: null, get: () => Audio90.station, set: v => Audio90.setStation(v) },
-    { k: 'livefm', label: 'LIVE RADIO', vals: ['OFF (BUILT-IN)', 'ON (SomaFM)'], get: () => Audio90.live ? 1 : 0, set: v => Audio90.setLive(!!v) },
-    { k: 'fx', label: 'SCREEN FX', vals: ['REDUCED', 'FULL'], get: () => opt.fx ? 1 : 0, set: v => { opt.fx = !!v; document.body.classList.toggle('reduced', !opt.fx); } },
-    { k: 'howto', label: '► HOW TO PLAY', vals: null },
-    { k: 'start', label: '► START MATCH', vals: null }
-  ];
-  function visibleMenu() { return MENU.filter(m => !m.hide || !m.hide()); }
+  const SPEEDS = [.28, .45, .70, 1.0], DEBOUNCES = [0, 300, 600, 900, 1500];
+  function nearest(arr, v) {
+    let bi = 0, bd = 1e9;
+    arr.forEach((a, i) => { const d = Math.abs(a - v); if (d < bd) { bd = d; bi = i; } });
+    return bi;
+  }
+  const MENU_PAGES = {
+    main: [
+      { k: 'mode', label: 'GAME MODE', vals: MODE_KEYS.map(k => MODE_NAMES[k]), get: () => MODE_KEYS.indexOf(opt.mode), set: v => opt.mode = MODE_KEYS[v] },
+      { k: 'access', label: 'ACCESS LEVEL', vals: ACCESS_NAMES, get: () => opt.access, set: v => applyAccess(v) },
+      { k: 'players', label: 'PLAYERS', vals: ['1P + CPU', '2 PLAYER'], get: () => opt.players - 1, set: v => opt.players = v + 1 },
+      { k: 'cpu', label: 'CPU LEVEL', vals: CPU_NAMES, get: () => opt.cpu, set: v => opt.cpu = v, hide: () => opt.players === 2 },
+      { k: 'target', label: 'PLAY TO', vals: ['5', '7', '11', '15'], get: () => nearest([5, 7, 11, 15], opt.target), set: v => opt.target = [5, 7, 11, 15][v], hide: () => opt.mode === 'coop' },
+      { k: 'radio', label: 'RADIO', vals: null, get: () => Audio90.station, set: v => Audio90.setStation(v), disp: () => { const s = Audio90.stations[Audio90.station]; return s.dial + ' ' + s.name; } },
+      { k: 'openAccess', label: '► SETUP & ACCESS' },
+      { k: 'howto', label: '► HOW TO PLAY' },
+      { k: 'start', label: '► START' }
+    ],
+    access: [
+      { k: 'speed', label: 'GAME SPEED', vals: ['SLOWEST', 'SLOW', 'MEDIUM', 'NORMAL'], get: () => nearest(SPEEDS, opt.speed), set: v => opt.speed = SPEEDS[v] },
+      { k: 'armed', label: 'SWING', vals: ['MUST BE TIMED', 'WAITS FOR BALL'], get: () => opt.armed ? 1 : 0, set: v => opt.armed = !!v },
+      { k: 'autoPlay', label: 'AUTO-PLAY HELP', vals: ['OFF', 'ON'], get: () => opt.autoPlay ? 1 : 0, set: v => opt.autoPlay = !!v },
+      { k: 'debounce', label: 'IGNORE FAST REPEATS', vals: ['OFF', '0.3s', '0.6s', '0.9s', '1.5s'], get: () => nearest(DEBOUNCES, opt.debounce), set: v => opt.debounce = DEBOUNCES[v] },
+      { k: 'menuLock', label: 'MENU CONTROL', vals: ['ANY BUTTON', 'TEACHER ONLY'], get: () => opt.menuLock ? 1 : 0, set: v => opt.menuLock = !!v },
+      { k: 'assist', label: 'TIMING RING', vals: ['OFF', 'ON'], get: () => opt.assist ? 1 : 0, set: v => opt.assist = !!v },
+      { k: 'pro', label: 'PRO RULES', vals: ['OFF', 'ON'], get: () => opt.proRules ? 1 : 0, set: v => opt.proRules = !!v },
+      { k: 'fx', label: 'SCREEN FX', vals: ['REDUCED', 'FULL'], get: () => opt.fx ? 1 : 0, set: v => { opt.fx = !!v; document.body.classList.toggle('reduced', !opt.fx); } },
+      { k: 'livefm', label: 'LIVE RADIO', vals: ['OFF (BUILT-IN)', 'ON (SomaFM)'], get: () => Audio90.live ? 1 : 0, set: v => Audio90.setLive(!!v) },
+      { k: 'back', label: '◄ BACK' }
+    ]
+  };
+  function visibleMenu() { return MENU_PAGES[S.page].filter(m => !m.hide || !m.hide()); }
   function menuMove(d) {
     if (S.mode !== 'menu') return;
     const v = visibleMenu();
@@ -1310,6 +1423,7 @@ const Art = (function () {
   function menuAdjust(d) {
     if (S.mode !== 'menu') return;
     const m = visibleMenu()[S.menuIdx];
+    if (!m) return;
     if (m.k === 'radio') { Audio90.setStation(Audio90.station + d); return; }
     if (!m.vals) { activate(m); return; }
     const n = m.vals.length;
@@ -1319,24 +1433,33 @@ const Art = (function () {
     if (!m) return;
     if (m.k === 'start') { startMatch(); return; }
     if (m.k === 'howto') { S.mode = 'howto'; Audio90.sfx.confirm(); return; }
+    if (m.k === 'openAccess') { S.page = 'access'; S.menuIdx = 0; Audio90.sfx.confirm(); return; }
+    if (m.k === 'back') { S.page = 'main'; S.menuIdx = 0; Audio90.sfx.ui(); return; }
     if (m.k === 'radio') { Audio90.setStation(Audio90.station + 1); return; }
     if (!m.vals) return;
     menuAdjust(1);
   }
-  // menu rows are clickable too — keep this in sync with drawMenu()
-  const MENU_TOP = 110, MENU_ROW = 38;
+  // rows are clickable; geometry shrinks to fit however many the page has
+  const MENU_TOP = 108;
+  function menuGeom() {
+    const n = visibleMenu().length;
+    return { top: MENU_TOP, rowH: Math.min(38, Math.floor(374 / Math.max(1, n))) };
+  }
   function menuRowAt(lx, ly) {
     if (lx < 176 || lx > 784) return -1;
-    const i = Math.floor((ly - MENU_TOP + 3) / MENU_ROW);
-    return (i >= 0 && i < visibleMenu().length && ly >= MENU_TOP - 3) ? i : -1;
+    const g = menuGeom();
+    const i = Math.floor((ly - g.top + 3) / g.rowH);
+    return (i >= 0 && i < visibleMenu().length && ly >= g.top - 3) ? i : -1;
   }
   function startMatch() {
-    S.score = [0, 0]; S.serving = 0; S.winner = -1; S.recT = 0;
+    S.score = [0, 0]; S.serving = 0; S.winner = -1; S.recT = 0; S.best = 0;
     pl[0].human = true;
     pl[1].human = opt.players === 2;
     Audio90.sfx.confirm(); Audio90.duck(false);
     setupServe();
-    banner('GAME ON! FIRST TO ' + opt.target + ', WIN BY 2');
+    banner(opt.mode === 'coop' ? 'KEEP IT GOING — HOW MANY IN A ROW?'
+      : opt.mode === 'nofail' ? 'NO-FAIL MATCH — FIRST TO ' + opt.target
+        : 'GAME ON! FIRST TO ' + opt.target + ', WIN BY 2');
   }
   // shared by "hold your button" and the Enter key
   function confirmAction() {
@@ -1364,6 +1487,10 @@ const Art = (function () {
 
     // one-switch UI: tap = next, hold = activate
     btn.forEach((b, i) => {
+      // A student resting on their switch must not be able to walk through the
+      // options and undo the teacher's setup.
+      const locked = opt.menuLock && S.mode === 'menu';
+      if (locked) return;
       if (b.down && !b.holdFired && performance.now() - b.t0 > HOLD_MS) {
         b.holdFired = true;
         confirmAction();
@@ -1376,17 +1503,21 @@ const Art = (function () {
       }
     });
 
-    if (S.mode === 'title' || S.mode === 'menu' || S.mode === 'howto' || S.mode === 'pause') { clearEdges(); return; }
+    if (['title', 'menu', 'howto', 'pause', 'gameover'].indexOf(S.mode) >= 0) { clearEdges(); return; }
 
     S.recT += dt;
 
     if (S.mode === 'serve') {
-      const sp = opt.assist ? 0.95 : 1.25;
+      const sp = (opt.assist ? 0.95 : 1.25) * opt.speed;
       S.serveMeter += S.serveDir * dt * sp;
       if (S.serveMeter > 1) { S.serveMeter = 1; S.serveDir = -1; }
       if (S.serveMeter < 0) { S.serveMeter = 0; S.serveDir = 1; }
+      S.serveWait += dt;
       const sv = S.serving;
-      if (pl[sv].human && btn[sv].pressed) doServe(S.serveMeter);
+      // outside CLASSIC the serve isn't a second timing puzzle: any press serves
+      const easyServe = opt.mode !== 'classic';
+      if (pl[sv].human && btn[sv].pressed) doServe(easyServe ? 0.72 : S.serveMeter);
+      else if (pl[sv].human && opt.autoPlay && S.serveWait > 12) doServe(0.72);
       else if (!pl[sv].human) updateAI(pl[sv], dt);
       if (S.mode === 'serve') {          // still winding up — ball rests in the server's hand
         ball.x = pl[sv].x * 0.94; ball.y = pl[sv].side * 21.4;
@@ -1407,8 +1538,8 @@ const Art = (function () {
       return;
     }
 
-    // rally
-    const sub = 2, h = dt / sub;
+    // rally — opt.speed puts the whole simulation into slow motion
+    const sub = 2, h = (dt * opt.speed) / sub;
     for (let i = 0; i < sub; i++) {
       pl.forEach(p => updatePlayer(p, h));
       stepBall(h);
@@ -1661,6 +1792,16 @@ const Art = (function () {
 
   /* ---------------- HUD ---------------- */
   function drawScoreboard() {
+    if (opt.mode === 'coop') {
+      Art.panel(ctx, 300, 8, 360, 54, '#1a0b2e', '#8dff3a');
+      Art.label(ctx, 'TEAM RALLY', 380, 22, 15, '#8dff3a');
+      Art.chunky(ctx, String(S.rally), 380, 56, { size: 34, fill: '#fff', depth: 2 });
+      Art.label(ctx, 'BEST', 580, 22, 15, '#ffe83d');
+      Art.chunky(ctx, String(S.best), 580, 56, { size: 34, fill: '#ffe83d', depth: 2 });
+      if (S.rally > 0 && S.mode === 'rally')
+        Art.label(ctx, 'KEEP IT GOING!', 480, 76, 20, S.rally >= 8 ? '#ffe83d' : '#00f0ff');
+      return;
+    }
     Art.panel(ctx, 300, 8, 360, 54, '#1a0b2e', '#00f0ff');
     const sv = S.serving;
     for (let i = 0; i < 2; i++) {
@@ -1738,19 +1879,33 @@ const Art = (function () {
   function drawServeMeter() {
     const sv = S.serving;
     const x = 314, y = 546, w = 338, h = 26;
-    Art.panel(ctx, x, y, w, h, '#150a28', '#ffe83d');
-    const lo = opt.assist ? 0.30 : 0.36, hi = opt.assist ? 0.94 : 0.88;
-    ctx.save();
-    ctx.fillStyle = '#c02040'; ctx.fillRect(x + 4, y + 4, (lo) * (w - 8), h - 8);
-    ctx.fillStyle = '#2fc04a'; ctx.fillRect(x + 4 + lo * (w - 8), y + 4, (hi - lo) * (w - 8), h - 8);
-    ctx.fillStyle = '#c02040'; ctx.fillRect(x + 4 + hi * (w - 8), y + 4, (1 - hi) * (w - 8), h - 8);
-    const mx = x + 4 + S.serveMeter * (w - 8);
-    ctx.fillStyle = '#fff'; ctx.fillRect(mx - 3, y - 4, 6, h + 8);
-    ctx.fillStyle = '#000'; ctx.fillRect(mx - 1, y - 4, 2, h + 8);
-    ctx.restore();
     const who = pl[sv].human ? (sv === 0 ? 'P1' : 'P2') : 'CPU';
-    Art.label(ctx, who + ' SERVE — ' + (serveSideOf(sv) > 0 ? 'RIGHT' : 'LEFT') + ' COURT' +
-      (pl[sv].human ? ' — PRESS IN THE GREEN' : ''), 483, y - 14, 16, '#ffe83d');
+
+    if (opt.mode === 'classic') {
+      Art.panel(ctx, x, y, w, h, '#150a28', '#ffe83d');
+      const lo = opt.assist ? 0.30 : 0.36, hi = opt.assist ? 0.94 : 0.88;
+      ctx.save();
+      ctx.fillStyle = '#c02040'; ctx.fillRect(x + 4, y + 4, (lo) * (w - 8), h - 8);
+      ctx.fillStyle = '#2fc04a'; ctx.fillRect(x + 4 + lo * (w - 8), y + 4, (hi - lo) * (w - 8), h - 8);
+      ctx.fillStyle = '#c02040'; ctx.fillRect(x + 4 + hi * (w - 8), y + 4, (1 - hi) * (w - 8), h - 8);
+      const mx = x + 4 + S.serveMeter * (w - 8);
+      ctx.fillStyle = '#fff'; ctx.fillRect(mx - 3, y - 4, 6, h + 8);
+      ctx.fillStyle = '#000'; ctx.fillRect(mx - 1, y - 4, 2, h + 8);
+      ctx.restore();
+      Art.label(ctx, who + ' SERVE — ' + (serveSideOf(sv) > 0 ? 'RIGHT' : 'LEFT') + ' COURT' +
+        (pl[sv].human ? ' — PRESS IN THE GREEN' : ''), 483, y - 14, 16, '#ffe83d');
+    } else if (pl[sv].human) {
+      // no second timing puzzle — just press, whenever you're ready
+      const pulse = 0.5 + 0.5 * Math.sin(S.t * 3.4);
+      Art.panel(ctx, 292, 534, 382, 42, '#2a0b4a', '#ffe83d');
+      ctx.save();
+      ctx.globalAlpha = 0.22 + 0.34 * pulse;
+      ctx.fillStyle = '#ffe83d'; ctx.fillRect(296, 538, 374, 34);
+      ctx.restore();
+      Art.label(ctx, who + ' — PRESS YOUR BUTTON TO SERVE', 483, 556, 22, '#fff');
+    } else {
+      Art.label(ctx, 'CPU IS SERVING…', 483, 556, 22, '#ffe83d');
+    }
     // big arrow over the server so you know whose turn it is
     const q = proj(pl[sv].x, pl[sv].side * 21.8, 0);
     const bob = Math.sin(S.t * 6) * 5;
@@ -1766,24 +1921,50 @@ const Art = (function () {
 
   function drawMessages() {
     if (S.msgT > 0) {
+      // Parked in the left apron and wrapped to stay there — dead centre put it
+      // right on top of whichever player had just hit the ball.
+      const MAXW = 240, SIZE = 40;
       const k = 1 - S.msgT / 1.6;
-      const pop = S.msgT > 1.35 ? lerp(1.5, 1, (1.6 - S.msgT) / 0.25) : 1;
+      const pop = S.msgT > 1.35 ? lerp(1.22, 1, (1.6 - S.msgT) / 0.25) : 1;
       ctx.save();
-      ctx.globalAlpha = clamp(S.msgT * 2, 0, 1);
-      ctx.translate(480, 200 - k * 26);
-      ctx.scale(pop, pop);
-      Art.chunky(ctx, S.msg, 0, 0, {
-        size: 62, fill: ['#fff', '#ffe83d', '#ff8a1e'], outline: '#000', outlineW: 6,
-        rot: -0.05, chroma: opt.fx, depth: 5
+      ctx.font = SIZE + 'px Impact, "Arial Black", sans-serif';
+      const words = S.msg.split(' '), lines = [];
+      let cur = '';
+      words.forEach(w => {
+        const t = cur ? cur + ' ' + w : w;
+        if (ctx.measureText(t).width > MAXW && cur) { lines.push(cur); cur = w; }
+        else cur = t;
       });
-      if (S.msgSub) Art.chunky(ctx, S.msgSub, 0, 34, { size: 24, fill: '#00f0ff', outline: '#000', outlineW: 4, depth: 2 });
+      if (cur) lines.push(cur);
+
+      ctx.globalAlpha = clamp(S.msgT * 2, 0, 1);
+      ctx.translate(30, 104 - k * 12);
+      ctx.scale(pop, pop);
+      lines.forEach((ln, i) => {
+        let s = SIZE;
+        const w = ctx.measureText(ln).width;      // a single long word still fits
+        if (w > MAXW) s = Math.max(20, SIZE * MAXW / w);
+        Art.chunky(ctx, ln, 0, i * (SIZE + 2), {
+          size: s, fill: ['#fff', '#ffe83d', '#ff8a1e'], outline: '#000', outlineW: 4,
+          rot: -0.05, chroma: opt.fx, depth: 4, align: 'left'
+        });
+      });
+      if (S.msgSub) {
+        ctx.font = '18px Impact, "Arial Black", sans-serif';
+        let ss = 18;
+        const sw = ctx.measureText(S.msgSub).width;
+        if (sw > MAXW) ss = Math.max(11, 18 * MAXW / sw);
+        Art.chunky(ctx, S.msgSub, 0, lines.length * (SIZE + 2) + 6, {
+          size: ss, fill: '#00f0ff', outline: '#000', outlineW: 3, depth: 2, align: 'left'
+        });
+      }
       ctx.restore();
     }
     if (S.bannerT > 0) {
       ctx.save();
       ctx.globalAlpha = clamp(S.bannerT * 2.2, 0, 1);
-      Art.panel(ctx, 210, 96, 540, 40, '#000', '#ff2e97');
-      Art.label(ctx, S.banner, 480, 117, 22, '#ffe83d');
+      Art.panel(ctx, 392, 94, 368, 38, '#000', '#ff2e97');   // clear of the shout column
+      Art.label(ctx, S.banner, 576, 114, 20, '#ffe83d');
       ctx.restore();
     }
   }
@@ -1848,47 +2029,54 @@ const Art = (function () {
     Art.chunky(ctx, 'OPTIONS', 480, 74, { size: 54, fill: ['#ffe83d', '#ff8a1e'], outline: '#000', outlineW: 6, rot: -0.02, depth: 5 });
     const v = visibleMenu();
     S.menuIdx = clamp(S.menuIdx, 0, v.length - 1);
-    const top = MENU_TOP, rowH = MENU_ROW;
+    const g = menuGeom(), top = g.top, rowH = g.rowH;
+    const fs = rowH >= 36 ? 24 : 21;
     v.forEach((m, i) => {
       const y = top + i * rowH, sel = i === S.menuIdx;
       if (sel) {
-        Art.panel(ctx, 176, y - 3, 608, 36, '#4a1a8a', '#00f0ff');
+        Art.panel(ctx, 176, y - 3, 608, rowH - 2, '#4a1a8a', '#00f0ff');
         ctx.save(); ctx.fillStyle = '#ffe83d';
-        const px = 196 + Math.sin(S.t * 8) * 4;
-        ctx.beginPath(); ctx.moveTo(px, y + 6); ctx.lineTo(px + 13, y + 15); ctx.lineTo(px, y + 24); ctx.closePath(); ctx.fill();
+        const px = 196 + Math.sin(S.t * 8) * 4, my = y + rowH / 2 - 1;
+        ctx.beginPath(); ctx.moveTo(px, my - 8); ctx.lineTo(px + 13, my); ctx.lineTo(px, my + 8); ctx.closePath(); ctx.fill();
         ctx.restore();
       }
-      Art.label(ctx, m.label, 226, y + 16, 24, sel ? '#fff' : '#b58fe8', 'left');
+      const my = y + rowH / 2 - 1;
+      Art.label(ctx, m.label, 226, my, fs, sel ? '#fff' : '#b58fe8', 'left');
       let val = '';
-      if (m.k === 'radio') { const st = Audio90.stations[Audio90.station]; val = st.dial + ' ' + st.name; }
+      if (m.disp) val = m.disp();
       else if (m.vals) val = m.vals[m.get()];
-      if (val) Art.label(ctx, '◄ ' + val + ' ►', 700, y + 16, 22, sel ? '#ffe83d' : '#8dff3a', 'center');
+      if (val) Art.label(ctx, '◄ ' + val + ' ►', 700, my, fs - 2, sel ? '#ffe83d' : '#8dff3a', 'center');
     });
     Art.panel(ctx, 176, 500, 608, 66, '#1a0b2e', '#ff2e97');
-    Art.label(ctx, 'TAP your button = MOVE DOWN        HOLD your button = CHANGE / SELECT', 480, 522, 17, '#fff');
-    Art.label(ctx, 'or use ARROW KEYS + the mouse.  [M] tunes the radio anytime.', 480, 548, 16, '#c9a7ff');
+    if (opt.menuLock) {
+      Art.label(ctx, 'TEACHER SETUP — ARROW KEYS + ENTER, or click a row', 480, 522, 18, '#fff');
+      Art.label(ctx, "Player buttons do nothing here, so a held switch can't change your setup.", 480, 548, 15, '#c9a7ff');
+    } else {
+      Art.label(ctx, 'TAP your button = MOVE DOWN        HOLD your button = CHANGE / SELECT', 480, 522, 17, '#fff');
+      Art.label(ctx, 'or use ARROW KEYS + the mouse.  [M] tunes the radio anytime.', 480, 548, 16, '#c9a7ff');
+    }
   }
 
   function drawHowTo() {
     Art.backdrop(ctx, W, H, S.t, opt.fx);
     Art.chunky(ctx, 'HOW TO JAM', 480, 66, { size: 48, fill: ['#00f0ff', '#8dff3a'], outline: '#000', outlineW: 6, depth: 4 });
     const lines = [
-      ['YOU ONLY GET ONE BUTTON.', '#ffe83d'],
-      ['Your player runs to the ball automatically. All you do is swing.', '#fff'],
+      ['ONE BUTTON. THAT IS THE WHOLE GAME.', '#ffe83d'],
+      ['Your player runs to the ball on their own. You only swing.', '#fff'],
       ['', ''],
-      ['TAP  — drive the ball deep.', '#8dff3a'],
-      ['HOLD — lob it high over their head.', '#8dff3a'],
-      ['TAP when the ball is low at the kitchen line — that is a DINK.', '#8dff3a'],
+      ['ACCESS LEVEL — set this first', '#ffe83d'],
+      ['EASIEST / EASY: the swing WAITS for the ball. Press whenever you', '#8dff3a'],
+      ['like, early or late, and you will hit it. Nothing goes out or nets.', '#8dff3a'],
+      ['STANDARD / CLASSIC: the game speeds up and timing starts to count.', '#fff'],
       ['', ''],
-      ['TIMING IS EVERYTHING', '#ffe83d'],
-      ['Press when the shrinking ring hits the white circle = ZINGER.', '#fff'],
-      ['Press early and the ball goes one way. Late, the other. Use it to aim.', '#fff'],
+      ['GAME MODES', '#ffe83d'],
+      ['CO-OP RALLY — no opponent. Count your hits in a row as a team.', '#fff'],
+      ['NO-FAIL MATCH — points are scored, but you cannot fault.', '#fff'],
+      ['CLASSIC RULES — real pickleball: side-outs, kitchen, double bounce.', '#fff'],
       ['', ''],
-      ['THE RULES (yes, real ones)', '#ffe83d'],
-      ['Only the SERVER can score. Lose the rally on serve = SIDE OUT.', '#fff'],
-      ['Serve must clear the purple kitchen, diagonally. Deep is better.', '#fff'],
-      ['PRO RULES: serve and return must bounce before anyone smacks it.', '#fff'],
-      ['No volleying while standing in the kitchen. Ever.', '#fff'],
+      ['IN SETUP & ACCESS', '#ffe83d'],
+      ['Game speed, AUTO-PLAY HELP (swings for them if nobody presses),', '#fff'],
+      ['and IGNORE FAST REPEATS for extra or involuntary presses.', '#fff'],
       ['', ''],
       ['[M] TUNES THE RADIO — 5 LIVE STATIONS', '#ffe83d'],
       ['No signal? The built-in backup tape takes over automatically.', '#fff']
@@ -1973,6 +2161,7 @@ const Art = (function () {
     draw();
     requestAnimationFrame(frame);
   }
+  applyAccess(1);          // start on EASY — the teacher can raise it
   Audio90.setStation(3);   // boot up on PULSE 99.7
   window.PJ = { S: S, pl: pl, ball: ball, opt: opt, startMatch: startMatch };  // debug hook
   requestAnimationFrame(frame);
