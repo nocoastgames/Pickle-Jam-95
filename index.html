@@ -867,6 +867,7 @@ const Art = (function () {
     if (e.code === 'ArrowRight') { menuAdjust(1); e.preventDefault(); return; }
     if (e.code === 'ArrowLeft') { menuAdjust(-1); e.preventDefault(); return; }
     if (e.code === 'Enter' || e.code === 'NumpadEnter') { Audio90.resume(); confirmAction(); e.preventDefault(); return; }
+    if (e.code === 'Backspace') { goBack(); e.preventDefault(); return; }
     const i = keyMap[e.code];
     if (i !== undefined) { press(i); e.preventDefault(); }
   });
@@ -1469,6 +1470,25 @@ const Art = (function () {
     else if (S.mode === 'gameover') { S.mode = 'menu'; S.menuIdx = 0; Audio90.duck(false); Audio90.sfx.confirm(); }
     else if (S.mode === 'pause') togglePause();
   }
+  // Backspace = go up one level, the way a back button does everywhere else.
+  // From a live match it pauses first, so a stray press can't dump the match.
+  function goBack() {
+    if (S.mode === 'menu') {
+      if (S.page === 'access') { S.page = 'main'; S.menuIdx = 0; }
+      else { S.mode = 'title'; S.t = 0; }
+      Audio90.sfx.ui(); return;
+    }
+    if (S.mode === 'howto') { S.mode = 'menu'; Audio90.sfx.ui(); return; }
+    if (S.mode === 'gameover') {
+      S.mode = 'menu'; S.page = 'main'; S.menuIdx = 0;
+      Audio90.duck(false); Audio90.sfx.ui(); return;
+    }
+    if (S.mode === 'pause') {                       // already paused — now quit out
+      S.mode = 'menu'; S.page = 'main'; S.menuIdx = 0; S.winner = -1;
+      Audio90.duck(false); Audio90.sfx.ui(); return;
+    }
+    if (['serve', 'rally', 'point', 'replay'].indexOf(S.mode) >= 0) togglePause();
+  }
   function togglePause() {
     if (S.mode === 'pause') { S.mode = S.prev; Audio90.duck(false); }
     else if (['serve', 'rally', 'point', 'replay'].indexOf(S.mode) >= 0) {
@@ -2049,7 +2069,7 @@ const Art = (function () {
     });
     Art.panel(ctx, 176, 500, 608, 66, '#1a0b2e', '#ff2e97');
     if (opt.menuLock) {
-      Art.label(ctx, 'TEACHER SETUP — ARROW KEYS + ENTER, or click a row', 480, 522, 18, '#fff');
+      Art.label(ctx, 'TEACHER SETUP — ARROW KEYS + ENTER, [BACKSPACE] = BACK', 480, 522, 18, '#fff');
       Art.label(ctx, "Player buttons do nothing here, so a held switch can't change your setup.", 480, 548, 15, '#c9a7ff');
     } else {
       Art.label(ctx, 'TAP your button = MOVE DOWN        HOLD your button = CHANGE / SELECT', 480, 522, 17, '#fff');
@@ -2092,7 +2112,8 @@ const Art = (function () {
     ctx.save(); ctx.fillStyle = 'rgba(10,4,22,.78)'; ctx.fillRect(0, 0, W, H);
     Art.chunky(ctx, 'PAUSED', 480, 250, { size: 88, fill: ['#fff', '#00f0ff'], outline: '#000', outlineW: 8, chroma: opt.fx, depth: 6, rot: -0.03 });
     Art.label(ctx, 'HOLD your button — or press ESC — to resume', 480, 320, 22, '#ffe83d');
-    Art.label(ctx, '[M] change station     [N] mute', 480, 356, 18, '#c9a7ff');
+    Art.label(ctx, '[BACKSPACE] quit to the menu', 480, 352, 20, '#ff2e97');
+    Art.label(ctx, '[M] change station     [N] mute', 480, 386, 18, '#c9a7ff');
     ctx.restore();
   }
 
