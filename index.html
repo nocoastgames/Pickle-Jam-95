@@ -1,0 +1,1811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>PICKLE JAM '95</title>
+<meta name="description" content="A radical 90s pickleball game. One button. Two players.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥒</text></svg>">
+<style>
+  :root{
+    --neon-cyan:#00f0ff; --neon-mag:#ff2e97; --neon-yel:#ffe83d;
+    --neon-lime:#8dff3a; --deep:#1a0b2e; --deep2:#2d1155;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:#0a0416;}
+  body{
+    display:flex;align-items:center;justify-content:center;
+    font-family:Impact,'Arial Black','Haettenschweiler',sans-serif;
+    background:
+      radial-gradient(circle at 20% 10%, #3a1268 0%, transparent 55%),
+      radial-gradient(circle at 85% 85%, #0d3d5c 0%, transparent 55%),
+      #0a0416;
+    touch-action:none;-webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #shell{
+    position:fixed;inset:0;width:100vw;height:100vh;
+    display:flex;align-items:center;justify-content:center;
+  }
+  #stage{
+    position:relative;
+    width:min(100vw, calc(100vh * 1.6));
+    height:min(100vh, calc(100vw / 1.6));
+    box-shadow:0 0 0 4px #000, 0 0 0 10px var(--neon-mag), 0 0 0 14px #000,
+               0 0 60px rgba(255,46,151,.35), 0 0 120px rgba(0,240,255,.2);
+  }
+  canvas{display:block;width:100%;height:100%;image-rendering:auto;background:#150a28}
+  /* CRT / VHS overlay */
+  #crt{
+    position:absolute;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(
+      to bottom, rgba(0,0,0,.20) 0px, rgba(0,0,0,.20) 1px,
+      rgba(255,255,255,.015) 2px, rgba(255,255,255,.015) 3px);
+    mix-blend-mode:multiply;opacity:.85;
+  }
+  #vig{
+    position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.55) 100%);
+  }
+  #track{
+    position:absolute;left:0;right:0;height:14px;pointer-events:none;
+    background:linear-gradient(to bottom, transparent, rgba(255,255,255,.14), transparent);
+    opacity:.5;animation:trackroll 9s linear infinite;
+  }
+  @keyframes trackroll{0%{top:-5%}100%{top:105%}}
+  body.reduced #crt,body.reduced #track{display:none}
+  body.reduced #vig{opacity:.4}
+  #rot{
+    position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:#0a0416;color:var(--neon-yel);text-align:center;padding:24px;
+    font-size:22px;letter-spacing:2px;z-index:5;
+  }
+  @media (orientation:portrait) and (max-width:900px){
+    #rot{display:flex}
+  }
+</style>
+</head>
+<body>
+<div id="shell">
+  <div id="stage">
+    <canvas id="cv" width="960" height="600" aria-label="Pickle Jam 95 game"></canvas>
+    <div id="crt"></div>
+    <div id="track"></div>
+    <div id="vig"></div>
+    <div id="rot">◄ ROTATE YOUR DEVICE ►<br><span style="font-size:14px">PICKLE JAM PLAYS WIDE</span></div>
+  </div>
+</div>
+<script>
+/* ============================================================
+   PICKLE JAM '95 — AUDIO ENGINE
+   Procedural 90s radio stations + SFX. No files, all Web Audio.
+   ============================================================ */
+const Audio90 = (function () {
+  let ac = null, master, musicBus, sfxBus, delay, delayFb, delayWet, noiseBuf;
+  let started = false, muted = false;
+  let station = 1;            // index into STATIONS (0 = OFF/static)
+  let timerId = null, nextTime = 0, step16 = 0, bar = 0;
+  const LOOKAHEAD = 0.12, TICK_MS = 25;
+
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+
+  /* ---------- setup ---------- */
+  function init() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ac = new AC();
+    master = ac.createGain(); master.gain.value = 0.85;
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.knee.value = 24;
+    comp.ratio.value = 8; comp.attack.value = 0.004; comp.release.value = 0.22;
+    master.connect(comp); comp.connect(ac.destination);
+
+    musicBus = ac.createGain(); musicBus.gain.value = 0.55; musicBus.connect(master);
+    sfxBus = ac.createGain(); sfxBus.gain.value = 0.9; sfxBus.connect(master);
+
+    delay = ac.createDelay(1.0); delay.delayTime.value = 0.22;
+    delayFb = ac.createGain(); delayFb.gain.value = 0.3;
+    delayWet = ac.createGain(); delayWet.gain.value = 0.25;
+    delay.connect(delayFb); delayFb.connect(delay);
+    delay.connect(delayWet); delayWet.connect(musicBus);
+
+    // white noise buffer
+    const n = ac.sampleRate * 2;
+    noiseBuf = ac.createBuffer(1, n, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  }
+
+  function resume() {
+    init();
+    if (!ac) return;
+    if (ac.state === 'suspended') ac.resume();
+    if (!started) { started = true; nextTime = ac.currentTime + 0.08; step16 = 0; bar = 0; run(); }
+  }
+
+  /* ---------- primitive voices ---------- */
+  function env(g, t, a, d, peak, sus) {
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + d);
+    return t + a + d;
+  }
+  function noise(t, dur, gain, type, freq, q, dest) {
+    const s = ac.createBufferSource(); s.buffer = noiseBuf;
+    s.loop = true; s.playbackRate.value = 0.8 + Math.random() * 0.4;
+    const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q || 1;
+    const g = ac.createGain();
+    s.connect(f); f.connect(g); g.connect(dest || musicBus);
+    env(g, t, 0.004, dur, gain);
+    s.start(t); s.stop(t + dur + 0.08);
+    return f;
+  }
+  function kick(t, gain, f0, f1, dur) {
+    const o = ac.createOscillator(); o.type = 'sine';
+    const g = ac.createGain();
+    o.frequency.setValueAtTime(f0 || 150, t);
+    o.frequency.exponentialRampToValueAtTime(f1 || 44, t + 0.09);
+    o.connect(g); g.connect(musicBus);
+    env(g, t, 0.003, dur || 0.3, gain || 0.9);
+    o.start(t); o.stop(t + (dur || 0.3) + 0.06);
+    // click
+    noise(t, 0.015, (gain || 0.9) * 0.3, 'highpass', 1200, 1);
+  }
+  function snare(t, gain, bright) {
+    noise(t, bright ? 0.19 : 0.13, (gain || 0.5), 'bandpass', bright ? 2400 : 1500, 0.8);
+    const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.value = 185;
+    const g = ac.createGain(); o.connect(g); g.connect(musicBus);
+    env(g, t, 0.002, 0.08, (gain || 0.5) * 0.5);
+    o.start(t); o.stop(t + 0.12);
+  }
+  function hat(t, open, gain) {
+    noise(t, open ? 0.24 : 0.045, gain || 0.22, 'highpass', 8200, 1);
+  }
+  function tone(t, midi, dur, type, gain, cut, dest) {
+    const o = ac.createOscillator(); o.type = type || 'square';
+    o.frequency.value = mtof(midi);
+    const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cut || 1800;
+    const g = ac.createGain();
+    o.connect(f); f.connect(g); g.connect(dest || musicBus);
+    env(g, t, 0.008, dur, gain || 0.25);
+    o.start(t); o.stop(t + dur + 0.1);
+    return o;
+  }
+  // distorted power chord — the sound of 1993
+  let shaper = null;
+  function getShaper() {
+    if (shaper) return shaper;
+    const c = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; c[i] = Math.tanh(x * 5); }
+    shaper = c; return c;
+  }
+  function guitar(t, midi, dur, gain) {
+    const ws = ac.createWaveShaper(); ws.curve = getShaper(); ws.oversample = '2x';
+    const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 2400; f.Q.value = 0.7;
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 110;
+    const g = ac.createGain();
+    ws.connect(f); f.connect(hp); hp.connect(g); g.connect(musicBus);
+    [0, 7, 12].forEach((iv, i) => {           // root + fifth + octave
+      const o = ac.createOscillator(); o.type = 'sawtooth';
+      o.frequency.value = mtof(midi + iv);
+      o.detune.value = (i - 1) * 7;
+      const og = ac.createGain(); og.gain.value = i === 2 ? 0.28 : 0.5;
+      o.connect(og); og.connect(ws);
+      o.start(t); o.stop(t + dur + 0.1);
+    });
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain || 0.22, t + 0.012);
+    g.gain.setValueAtTime(gain || 0.22, t + dur * 0.6);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  }
+  function epiano(t, midi, dur, gain) {
+    const car = ac.createOscillator(); car.type = 'sine'; car.frequency.value = mtof(midi);
+    const mod = ac.createOscillator(); mod.type = 'sine'; mod.frequency.value = mtof(midi) * 2.01;
+    const mg = ac.createGain(); mg.gain.setValueAtTime(mtof(midi) * 2.2, t);
+    mg.gain.exponentialRampToValueAtTime(1, t + 0.35);
+    mod.connect(mg); mg.connect(car.frequency);
+    const g = ac.createGain(); car.connect(g); g.connect(musicBus); g.connect(delay);
+    env(g, t, 0.006, dur, gain || 0.18);
+    car.start(t); mod.start(t); car.stop(t + dur + 0.1); mod.stop(t + dur + 0.1);
+  }
+  function supersaw(t, midi, dur, gain, c0, c1) {
+    const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.Q.value = 7;
+    f.frequency.setValueAtTime(c0 || 900, t);
+    f.frequency.exponentialRampToValueAtTime(c1 || 2600, t + dur * 0.7);
+    const g = ac.createGain(); f.connect(g); g.connect(musicBus); g.connect(delay);
+    [-12, -5, 0, 5, 12].forEach(dt => {
+      const o = ac.createOscillator(); o.type = 'sawtooth';
+      o.frequency.value = mtof(midi); o.detune.value = dt;
+      o.connect(f); o.start(t); o.stop(t + dur + 0.1);
+    });
+    env(g, t, 0.01, dur, gain || 0.1);
+  }
+  function stab(t, midis, dur, gain, type, cut) {
+    midis.forEach(m => tone(t, m, dur, type || 'sawtooth', (gain || 0.12), cut || 2200, musicBus));
+  }
+
+  /* ---------- the stations ---------- */
+  // progressions are arrays of root midi notes, one per bar
+  const STATIONS = [
+    { name: 'STATIC', dial: '--.-', genre: 'RADIO OFF', color: '#888', bpm: 100, play: null },
+
+    { name: 'KRUD', dial: '104.5', genre: 'GRUNGE / ALT', color: '#8dff3a', bpm: 94, dly: 0.18,
+      prog: [40, 45, 43, 38],
+      play(s, t, b) {
+        const r = this.prog[b % 4];
+        if (s === 0) { kick(t, 1.0, 160, 48, .34); guitar(t, r, .55, .2); }
+        if (s === 3) guitar(t, r, .22, .15);
+        if (s === 4) { snare(t, .62, true); guitar(t, r + 3, .3, .17); }
+        if (s === 6) { kick(t, .85); }
+        if (s === 8) { kick(t, .95); guitar(t, r, .5, .19); }
+        if (s === 10) guitar(t, r + 5, .28, .15);
+        if (s === 12) { snare(t, .62, true); guitar(t, r, .45, .18); }
+        if (s === 14 && b % 2 === 1) { snare(t, .4); kick(t, .7); }
+        if (s % 2 === 0) hat(t, s === 14, .1);
+        // bass
+        if (s === 0 || s === 6 || s === 8 || s === 11) tone(t, r - 12, .3, 'sawtooth', .22, 420);
+        // wailing lead every 4th bar
+        if (b % 4 === 3 && (s === 8 || s === 11 || s === 14))
+          tone(t, r + [12, 15, 19][(s / 3) | 0 % 3], .3, 'square', .07, 2600);
+      }
+    },
+
+    { name: 'JAMZ', dial: '92.3', genre: 'HIP-HOP / R&B', color: '#ffa63d', bpm: 88, dly: 0.26,
+      prog: [48, 48, 46, 43],
+      play(s, t, b) {
+        const r = this.prog[b % 4];
+        if (s === 0 || s === 10) kick(t, 1.0, 130, 42, .4);
+        if (s === 6) kick(t, .7);
+        if (s === 4 || s === 12) snare(t, .55);
+        if (s === 15 && b % 4 === 3) snare(t, .35);
+        if (s % 2 === 0) hat(t, false, .16);
+        if (s % 4 === 2) hat(t, false, .09);
+        // fat bass
+        if (s === 0) tone(t, r - 24, .45, 'sine', .45, 260);
+        if (s === 7) tone(t, r - 24 + 3, .22, 'sine', .3, 260);
+        if (s === 10) tone(t, r - 24, .3, 'sine', .38, 260);
+        // rhodes-ish minor 9 stabs on the offbeats
+        if (s === 2 || s === 9) [0, 3, 7, 10, 14].forEach(iv => epiano(t, r + iv, .5, .085));
+        if (s === 13 && b % 2 === 1) [0, 3, 7].forEach(iv => epiano(t, r + iv - 2, .3, .07));
+        // vinyl crackle
+        if (s % 8 === 0) noise(t, .5, .012, 'highpass', 4000, .5);
+      }
+    },
+
+    { name: 'PULSE', dial: '99.7', genre: 'EURODANCE', color: '#00f0ff', bpm: 138, dly: 0.217,
+      prog: [45, 41, 48, 43],
+      play(s, t, b) {
+        const r = this.prog[b % 4];
+        if (s % 4 === 0) kick(t, 1.0, 175, 50, .26);
+        if (s % 4 === 2) hat(t, true, .17);
+        if (s % 2 === 1) hat(t, false, .1);
+        if (s === 4 || s === 12) snare(t, .3, true);
+        // offbeat 8th bass — the euro engine
+        if (s % 2 === 1) tone(t, r - 12, .14, 'sawtooth', .3, 700);
+        // piano/saw stabs
+        if (s === 0 || s === 6 || s === 10) stab(t, [r, r + 4, r + 7, r + 12], .18, .09);
+        // hoover lead riff on alternating bars
+        if (b % 2 === 1) {
+          const riff = [0, -1, 7, -1, 12, -1, 7, -1, 9, -1, 7, -1, 4, -1, 0, -1];
+          if (riff[s] >= 0) supersaw(t, r + 12 + riff[s], .22, .075, 1100, 3400);
+        }
+        if (s === 0 && b % 8 === 7) noise(t, 1.2, .1, 'highpass', 600, .5); // riser
+      }
+    },
+
+    { name: 'WAVE', dial: '88.1', genre: 'NEW JACK SWING', color: '#ff2e97', bpm: 112, dly: 0.2,
+      prog: [53, 52, 50, 55],
+      play(s, t, b) {
+        const r = this.prog[b % 4];
+        if (s === 0 || s === 3 || s === 8) kick(t, .95, 140, 45, .3);
+        if (s === 4 || s === 12) snare(t, .6, true);
+        if (s === 14) snare(t, .3);
+        if (s % 4 === 2) hat(t, false, .2);
+        if (s % 4 === 0) hat(t, false, .12);
+        if (s === 6 || s === 10) hat(t, true, .1);
+        if (s === 0) tone(t, r - 24, .35, 'triangle', .4, 380);
+        if (s === 6) tone(t, r - 24 + 7, .2, 'triangle', .28, 380);
+        if (s === 11) tone(t, r - 24 + 5, .25, 'triangle', .3, 380);
+        if (s === 0 || s === 7) [0, 4, 7, 11].forEach(iv => epiano(t, r + iv, .7, .1));
+        // sax-ish lead
+        if (b % 4 === 3 && [0, 4, 7, 10, 13].indexOf(s) >= 0)
+          tone(t, r + 12 + [0, 3, 5, 7, 5][[0, 4, 7, 10, 13].indexOf(s)], .34, 'sawtooth', .075, 1500, musicBus);
+      }
+    }
+  ];
+
+  /* ---------- scheduler ---------- */
+  function run() {
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {
+      if (!ac || ac.state !== 'running') return;
+      const st = STATIONS[station];
+      const spb = 60 / (st.bpm || 110) / 4;
+      while (nextTime < ac.currentTime + LOOKAHEAD) {
+        if (!muted && st.play) { try { st.play(step16, nextTime, bar); } catch (e) { } }
+        nextTime += spb;
+        step16++;
+        if (step16 >= 16) { step16 = 0; bar++; }
+      }
+    }, TICK_MS);
+  }
+
+  /* ---------- SFX ---------- */
+  const SFX = {
+    pop(power) {            // paddle strike — that hollow plastic POCK
+      if (!ac) return;
+      const t = ac.currentTime, p = 0.4 + (power || .5) * 0.6;
+      const o = ac.createOscillator(); o.type = 'triangle';
+      o.frequency.setValueAtTime(760 + power * 420, t);
+      o.frequency.exponentialRampToValueAtTime(220, t + .055);
+      const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+      env(g, t, .002, .07, .45 * p);
+      o.start(t); o.stop(t + .12);
+      noise(t, .035, .3 * p, 'highpass', 2600, 1, sfxBus);
+    },
+    dink() {
+      if (!ac) return; const t = ac.currentTime;
+      const o = ac.createOscillator(); o.type = 'sine';
+      o.frequency.setValueAtTime(520, t); o.frequency.exponentialRampToValueAtTime(260, t + .07);
+      const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+      env(g, t, .003, .09, .3); o.start(t); o.stop(t + .14);
+    },
+    bounce() {
+      if (!ac) return; const t = ac.currentTime;
+      const o = ac.createOscillator(); o.type = 'sine';
+      o.frequency.setValueAtTime(340, t); o.frequency.exponentialRampToValueAtTime(150, t + .06);
+      const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+      env(g, t, .002, .07, .22); o.start(t); o.stop(t + .12);
+    },
+    net() {
+      if (!ac) return; const t = ac.currentTime;
+      noise(t, .16, .3, 'lowpass', 700, 1, sfxBus);
+      const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = 95;
+      const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+      env(g, t, .004, .14, .25); o.start(t); o.stop(t + .2);
+    },
+    whistle() {
+      if (!ac) return; const t = ac.currentTime;
+      [2050, 2580].forEach(f => {
+        const o = ac.createOscillator(); o.type = 'square'; o.frequency.value = f;
+        const lfo = ac.createOscillator(); lfo.frequency.value = 26;
+        const lg = ac.createGain(); lg.gain.value = 55;
+        lfo.connect(lg); lg.connect(o.frequency);
+        const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+        env(g, t, .02, .3, .07);
+        o.start(t); lfo.start(t); o.stop(t + .36); lfo.stop(t + .36);
+      });
+    },
+    cheer(big) {
+      if (!ac) return; const t = ac.currentTime, dur = big ? 1.6 : .9;
+      const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true;
+      const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = .8;
+      f.frequency.setValueAtTime(420, t);
+      f.frequency.linearRampToValueAtTime(1400, t + dur * .35);
+      f.frequency.linearRampToValueAtTime(700, t + dur);
+      const g = ac.createGain();
+      const lfo = ac.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 7;
+      const lg = ac.createGain(); lg.gain.value = .08; lfo.connect(lg); lg.connect(g.gain);
+      s.connect(f); f.connect(g); g.connect(sfxBus);
+      g.gain.setValueAtTime(.0001, t);
+      g.gain.linearRampToValueAtTime(big ? .34 : .2, t + .12);
+      g.gain.linearRampToValueAtTime(.0001, t + dur);
+      s.start(t); lfo.start(t); s.stop(t + dur + .1); lfo.stop(t + dur + .1);
+    },
+    ui() {
+      if (!ac) return; const t = ac.currentTime;
+      const o = ac.createOscillator(); o.type = 'square'; o.frequency.value = 880;
+      const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+      env(g, t, .002, .05, .16); o.start(t); o.stop(t + .09);
+    },
+    confirm() {
+      if (!ac) return; const t = ac.currentTime;
+      [0, 4, 7, 12].forEach((iv, i) => {
+        const o = ac.createOscillator(); o.type = 'square'; o.frequency.value = mtof(72 + iv);
+        const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+        env(g, t + i * .05, .003, .09, .13); o.start(t + i * .05); o.stop(t + i * .05 + .15);
+      });
+    },
+    fault() {
+      if (!ac) return; const t = ac.currentTime;
+      const o = ac.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(380, t); o.frequency.exponentialRampToValueAtTime(90, t + .38);
+      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 1100;
+      const g = ac.createGain(); o.connect(f); f.connect(g); g.connect(sfxBus);
+      env(g, t, .005, .4, .2); o.start(t); o.stop(t + .5);
+    },
+    tune() {   // radio dial change: static burst + tiny station ID
+      if (!ac) return; const t = ac.currentTime;
+      noise(t, .18, .16, 'bandpass', 1800, .6, sfxBus);
+      const st = STATIONS[station];
+      if (!st.play) return;
+      [0, 7, 12].forEach((iv, i) => {
+        const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.value = mtof(76 + iv);
+        const g = ac.createGain(); o.connect(g); g.connect(sfxBus);
+        env(g, t + .12 + i * .06, .004, .12, .12);
+        o.start(t + .12 + i * .06); o.stop(t + .4 + i * .06);
+      });
+    }
+  };
+
+  /* ---------- public ---------- */
+  return {
+    resume, init,
+    sfx: SFX,
+    stations: STATIONS,
+    get station() { return station; },
+    get ready() { return !!ac && ac.state === 'running'; },
+    setStation(i) {
+      station = ((i % STATIONS.length) + STATIONS.length) % STATIONS.length;
+      if (ac) {
+        delay.delayTime.value = STATIONS[station].dly || 0.2;
+        step16 = 0; bar = 0; nextTime = ac.currentTime + 0.05;
+        SFX.tune();
+      }
+      return STATIONS[station];
+    },
+    nextStation() { return this.setStation(station + 1); },
+    setMuted(m) { muted = m; if (musicBus) musicBus.gain.value = m ? 0 : 0.55; },
+    get muted() { return muted; },
+    duck(on) { if (musicBus && !muted) musicBus.gain.setTargetAtTime(on ? 0.18 : 0.55, ac.currentTime, .15); }
+  };
+})();
+/* ============================================================
+   PICKLE JAM '95 — ART HELPERS
+   Memphis shapes, chunky type, crowd, VHS furniture.
+   ============================================================ */
+const Art = (function () {
+  const PAL = {
+    cyan: '#00f0ff', mag: '#ff2e97', yel: '#ffe83d', lime: '#8dff3a',
+    orange: '#ff8a1e', purple: '#6b2fd1', deep: '#1a0b2e', deep2: '#2d1155',
+    teal: '#0e8f8f', white: '#fff', black: '#000'
+  };
+
+  /* deterministic pseudo-random so the confetti doesn't crawl */
+  function rnd(seed) { const x = Math.sin(seed * 127.1) * 43758.5453; return x - Math.floor(x); }
+
+  /* ---- Memphis shape vocabulary ---- */
+  function zigzag(ctx, x, y, w, h, n, color, lw) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw || 4;
+    ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const px = x + (w / n) * i, py = y + (i % 2 ? h : 0);
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+  }
+  function squiggle(ctx, x, y, w, amp, color, lw) {
+    ctx.strokeStyle = color; ctx.lineWidth = lw || 5; ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const px = x + (w / 40) * i, py = y + Math.sin(i / 40 * Math.PI * 3) * amp;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+  }
+  function tri(ctx, x, y, s, color, rot) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot || 0);
+    ctx.fillStyle = color; ctx.beginPath();
+    ctx.moveTo(0, -s); ctx.lineTo(s * .87, s * .5); ctx.lineTo(-s * .87, s * .5);
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  function dots(ctx, x, y, cols, rows, gap, r, color) {
+    ctx.fillStyle = color;
+    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
+      ctx.beginPath(); ctx.arc(x + i * gap, y + j * gap, r, 0, 7); ctx.fill();
+    }
+  }
+  function starburst(ctx, x, y, r1, r2, points, color, rot) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot || 0);
+    ctx.fillStyle = color; ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const a = (i / (points * 2)) * Math.PI * 2, r = i % 2 ? r2 : r1;
+      i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+
+  /* ---- the big background ---- */
+  function backdrop(ctx, W, H, t, motion) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#2a0f52'); g.addColorStop(.55, '#3b1466'); g.addColorStop(1, '#170a2c');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    const dr = motion ? t : 0;
+    ctx.save(); ctx.globalAlpha = .5;
+    // drifting confetti field
+    for (let i = 0; i < 46; i++) {
+      const sx = rnd(i) * W;
+      const sy = (rnd(i + 99) * H + dr * (12 + rnd(i + 5) * 22)) % H;
+      const c = [PAL.cyan, PAL.mag, PAL.yel, PAL.lime, PAL.orange][i % 5];
+      const k = i % 4;
+      if (k === 0) { ctx.fillStyle = c; ctx.fillRect(sx, sy, 10, 4); }
+      else if (k === 1) tri(ctx, sx, sy, 7, c, i);
+      else if (k === 2) { ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sx, sy, 6, 0, 7); ctx.stroke(); }
+      else { ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + 9, sy + 9); ctx.moveTo(sx + 9, sy); ctx.lineTo(sx, sy + 9); ctx.stroke(); }
+    }
+    ctx.globalAlpha = .55;
+    zigzag(ctx, -20, 26, W + 40, 16, 22, PAL.cyan, 4);
+    zigzag(ctx, -20, H - 40, W + 40, 16, 22, PAL.mag, 4);
+    squiggle(ctx, 30, 96, 180, 9, PAL.yel, 4);
+    squiggle(ctx, W - 210, 96, 180, 9, PAL.lime, 4);
+    dots(ctx, 26, 130, 4, 3, 13, 2.6, PAL.white);
+    dots(ctx, W - 66, 130, 4, 3, 13, 2.6, PAL.white);
+    ctx.restore();
+  }
+
+  /* ---- crowd of pixel people behind the far baseline ---- */
+  function crowd(ctx, W, t, cy, motion) {
+    const cols = ['#ff2e97', '#00f0ff', '#ffe83d', '#8dff3a', '#ff8a1e', '#ffffff', '#b06bff'];
+    ctx.save();
+    ctx.fillStyle = 'rgba(10,4,22,.75)';
+    ctx.fillRect(0, cy - 44, W, 52);
+    for (let i = 0; i < 70; i++) {
+      const x = 8 + (i * 13.7) % (W - 16);
+      const row = i % 3;
+      const bob = motion ? Math.sin(t * 3 + i * .9) * (2 + row) : 0;
+      const y = cy - 14 - row * 11 + bob;
+      ctx.fillStyle = cols[i % cols.length];
+      ctx.globalAlpha = .55 + row * .15;
+      ctx.beginPath(); ctx.arc(x, y - 6, 3.4, 0, 7); ctx.fill();
+      ctx.fillRect(x - 3.6, y - 3, 7.2, 9);
+    }
+    ctx.restore();
+  }
+
+  /* ---- chunky 90s type ---- */
+  // opts: size, fill (color or [c1,c2] gradient), shadow, outline, align, rot, skew
+  function chunky(ctx, text, x, y, opts) {
+    const o = opts || {};
+    const size = o.size || 40;
+    ctx.save();
+    ctx.translate(x, y);
+    if (o.rot) ctx.rotate(o.rot);
+    if (o.skew) ctx.transform(1, 0, o.skew, 1, 0, 0);
+    ctx.font = `${size}px Impact, "Arial Black", sans-serif`;
+    ctx.textAlign = o.align || 'center';
+    ctx.textBaseline = o.baseline || 'alphabetic';
+    const depth = o.depth === undefined ? Math.max(2, size * .06) : o.depth;
+
+    // hard drop shadow stack (the WordArt move)
+    if (depth > 0) {
+      ctx.fillStyle = o.shadow || '#000';
+      for (let i = depth; i > 0; i--) ctx.fillText(text, i, i);
+    }
+    // chromatic split
+    if (o.chroma) {
+      ctx.globalAlpha = .85;
+      ctx.fillStyle = PAL.cyan; ctx.fillText(text, -2.5, 0);
+      ctx.fillStyle = PAL.mag; ctx.fillText(text, 2.5, 0);
+      ctx.globalAlpha = 1;
+    }
+    let fill = o.fill || PAL.yel;
+    if (Array.isArray(fill)) {
+      const g = ctx.createLinearGradient(0, -size * .8, 0, size * .25);
+      fill.forEach((c, i) => g.addColorStop(i / (fill.length - 1), c));
+      fill = g;
+    }
+    ctx.fillStyle = fill;
+    ctx.fillText(text, 0, 0);
+    if (o.outline) {
+      ctx.lineWidth = o.outlineW || Math.max(2, size * .055);
+      ctx.strokeStyle = o.outline; ctx.lineJoin = 'round';
+      ctx.strokeText(text, 0, 0);
+    }
+    ctx.restore();
+  }
+
+  function label(ctx, text, x, y, size, color, align) {
+    ctx.save();
+    ctx.font = `${size}px Impact, "Arial Black", sans-serif`;
+    ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#000'; ctx.fillText(text, x + 2, y + 2);
+    ctx.fillStyle = color || '#fff'; ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  /* ---- beveled 90s UI panel ---- */
+  function panel(ctx, x, y, w, h, fill, edge) {
+    ctx.fillStyle = '#000'; ctx.fillRect(x + 4, y + 4, w, h);
+    ctx.fillStyle = fill || '#2d1155'; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = 'rgba(255,255,255,.28)';
+    ctx.fillRect(x, y, w, 3); ctx.fillRect(x, y, 3, h);
+    ctx.fillStyle = 'rgba(0,0,0,.4)';
+    ctx.fillRect(x, y + h - 3, w, 3); ctx.fillRect(x + w - 3, y, 3, h);
+    if (edge) { ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.strokeRect(x - 1, y - 1, w + 2, h + 2); }
+  }
+
+  /* ---- VHS record indicator ---- */
+  function recDot(ctx, x, y, t, secs) {
+    const on = (t % 1.4) < .8;
+    ctx.save();
+    if (on) { ctx.fillStyle = '#ff2020'; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fill(); }
+    label(ctx, 'REC', x + 16, y + 1, 18, '#fff', 'left');
+    const m = String(Math.floor(secs / 60)).padStart(2, '0');
+    const s = String(Math.floor(secs % 60)).padStart(2, '0');
+    const f = String(Math.floor((secs % 1) * 30)).padStart(2, '0');
+    label(ctx, `${m}:${s}:${f}`, x + 62, y + 1, 16, '#ffe83d', 'left');
+    ctx.restore();
+  }
+
+  return { PAL, rnd, zigzag, squiggle, tri, dots, starburst, backdrop, crowd, chunky, label, panel, recDot };
+})();
+/* ============================================================
+   PICKLE JAM '95 — GAME CORE
+   One button per player. Side-out scoring. Totally radical.
+   ============================================================ */
+(function () {
+  'use strict';
+
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const W = 960, H = 600;
+  const P = Art.PAL;
+
+  /* ---------------- court geometry (feet) ---------------- */
+  const HALF_W = 10;      // 20 ft wide
+  const HALF_L = 22;      // 44 ft long
+  const KITCHEN = 7;      // non-volley zone from net
+  const NET_H = 2.92;
+  const GRAV = -32;
+
+  // screen projection
+  const CX = 480, FAR_Y = 158, NEAR_Y = 522, VIEW_HW = 300, PPF = 8.4;
+  function proj(x, y, z) {
+    const t = (y + HALF_L) / (2 * HALF_L);
+    const s = 0.50 + 0.50 * t;
+    const gy = FAR_Y + (NEAR_Y - FAR_Y) * (0.70 * t + 0.30 * t * t);
+    return { x: CX + (x / HALF_W) * VIEW_HW * s, y: gy - z * PPF * s, gy: gy, s: s };
+  }
+
+  /* ---------------- options ---------------- */
+  const opt = {
+    players: 1,          // 1 = vs CPU, 2 = two humans
+    cpu: 1,              // 0 rookie 1 pro 2 all-star
+    assist: true,
+    proRules: true,      // double-bounce rule
+    target: 11,
+    fx: true             // full motion / flash
+  };
+  const CPU_NAMES = ['ROOKIE', 'PRO', 'ALL-STAR'];
+
+  /* ---------------- input ---------------- */
+  const HOLD_MS = 340;
+  function mkBtn() { return { down: false, t0: 0, pressed: false, released: false, holdFired: false, dur: 0 }; }
+  const btn = [mkBtn(), mkBtn()];
+  const keyMap = { 'KeyA': 0, 'ShiftLeft': 0, 'KeyQ': 0, 'KeyZ': 0, 'Space': 0, 'KeyL': 1, 'ShiftRight': 1, 'KeyP': 1, 'Slash': 1 };
+
+  function press(i) {
+    const b = btn[i];
+    if (b.down) return;
+    b.down = true; b.t0 = performance.now(); b.pressed = true; b.holdFired = false;
+    Audio90.resume();
+  }
+  function release(i) {
+    const b = btn[i];
+    if (!b.down) return;
+    b.down = false; b.dur = performance.now() - b.t0; b.released = true;
+  }
+
+  addEventListener('keydown', e => {
+    if (e.repeat) return;
+    if (e.code === 'Escape' || e.code === 'KeyO') { togglePause(); e.preventDefault(); return; }
+    if (e.code === 'KeyM') { tuneRadio(); e.preventDefault(); return; }
+    if (e.code === 'KeyN') { Audio90.setMuted(!Audio90.muted); e.preventDefault(); return; }
+    if (e.code === 'ArrowDown') { menuMove(1); e.preventDefault(); return; }
+    if (e.code === 'ArrowUp') { menuMove(-1); e.preventDefault(); return; }
+    if (e.code === 'ArrowRight') { menuAdjust(1); e.preventDefault(); return; }
+    if (e.code === 'ArrowLeft') { menuAdjust(-1); e.preventDefault(); return; }
+    if (e.code === 'Enter' || e.code === 'NumpadEnter') { Audio90.resume(); confirmAction(); e.preventDefault(); return; }
+    const i = keyMap[e.code];
+    if (i !== undefined) { press(i); e.preventDefault(); }
+  });
+  addEventListener('keyup', e => {
+    const i = keyMap[e.code];
+    if (i !== undefined) { release(i); e.preventDefault(); }
+  });
+  addEventListener('blur', () => { release(0); release(1); });
+
+  // touch / pointer: left half = P1, right half = P2
+  const touchOwner = {};
+  cv.addEventListener('pointerdown', e => {
+    const r = cv.getBoundingClientRect();
+    const lx = (e.clientX - r.left) / r.width * W, ly = (e.clientY - r.top) / r.height * H;
+    if (S.mode === 'menu') {
+      const row = menuRowAt(lx, ly);
+      if (row >= 0) { Audio90.resume(); S.menuIdx = row; activate(visibleMenu()[row]); e.preventDefault(); return; }
+    }
+    const i = lx < W / 2 ? 0 : 1;
+    touchOwner[e.pointerId] = i; press(i);
+    cv.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  cv.addEventListener('pointerup', e => {
+    const i = touchOwner[e.pointerId]; if (i !== undefined) { release(i); delete touchOwner[e.pointerId]; }
+    e.preventDefault();
+  });
+  cv.addEventListener('pointercancel', e => {
+    const i = touchOwner[e.pointerId]; if (i !== undefined) { release(i); delete touchOwner[e.pointerId]; }
+  });
+
+  // gamepads (great for switch/adaptive controllers)
+  const padWas = [false, false];
+  function pollPads() {
+    if (!navigator.getGamepads) return;
+    const pads = navigator.getGamepads();
+    for (let i = 0; i < 2; i++) {
+      const g = pads[i]; if (!g) continue;
+      const any = g.buttons.some(b => b && b.pressed);
+      if (any && !padWas[i]) press(i);
+      if (!any && padWas[i]) release(i);
+      padWas[i] = any;
+    }
+  }
+  function clearEdges() { btn.forEach(b => { b.pressed = false; b.released = false; }); }
+
+  /* ---------------- game state ---------------- */
+  const S = {
+    mode: 'title',       // title | menu | howto | serve | rally | point | replay | gameover | pause
+    prev: 'menu',
+    t: 0, recT: 0, shake: 0, flash: 0,
+    score: [0, 0], serving: 0, shots: 0, rally: 0,
+    msg: '', msgT: 0, msgSub: '',
+    pointT: 0, replayT: 0, banner: '', bannerT: 0,
+    winner: -1, menuIdx: 0, trail: [], lastPointWinner: 0,
+    serveMeter: 0, serveDir: 1, serveLocked: -1
+  };
+
+  const ball = { x: 0, y: 18, z: 3, vx: 0, vy: 0, vz: 0, live: false, bounces: 0, hitter: 0, spin: 0 };
+
+  function mkPlayer(idx) {
+    return {
+      idx: idx, side: idx === 0 ? 1 : -1,
+      x: 0, y: idx === 0 ? 19 : -19, tx: 0, ty: idx === 0 ? 19 : -19,
+      swingT: -1, swingHeld: false, cool: 0,
+      human: true, lunge: 0, shotType: '', react: 0, aiPlan: -1, aiHold: false
+    };
+  }
+  const pl = [mkPlayer(0), mkPlayer(1)];
+
+  /* ---------------- helpers ---------------- */
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function shout(text, sub) {
+    S.msg = text; S.msgSub = sub || ''; S.msgT = 1.6;
+  }
+  function banner(text) { S.banner = text; S.bannerT = 1.3; }
+
+  const RAD = ['RADICAL!', 'TUBULAR!', 'BOOYAH!', 'SWEET!', 'DA BOMB!', 'ALL THAT!', 'SCHWING!', 'KA-POW!', 'FRESH!', 'PHAT!'];
+  const OOF = ['AS IF!', 'NOT!', 'PSYCH!', 'BUMMER!', 'WHATEVER!', 'TALK TO THE HAND!', 'NO WAY!'];
+  const pick = a => a[(Math.random() * a.length) | 0];
+
+  function tuneRadio() {
+    const st = Audio90.nextStation();
+    banner('◄ ' + st.dial + ' ' + st.name + ' ► ' + st.genre);
+  }
+
+  /* ---------------- serving ---------------- */
+  function serveSideOf(i) { return S.score[i] % 2 === 0 ? 1 : -1; } // +1 = right court (x>0)
+
+  function setupServe() {
+    const sv = S.serving, r = 1 - sv;
+    const sSign = serveSideOf(sv);
+    // server's own right-hand court: near player's right is +x, far player's right is -x
+    const sx = (sv === 0 ? sSign : -sSign) * 5;
+    pl[sv].x = pl[sv].tx = sx;
+    pl[sv].y = pl[sv].ty = pl[sv].side * 21;
+    pl[r].x = pl[r].tx = -sx * 0.95;
+    pl[r].y = pl[r].ty = pl[r].side * 19.5;
+    pl.forEach(p => { p.swingT = -1; p.aiPlan = -1; p.shotType = ''; });
+    ball.x = sx * 0.94; ball.y = pl[sv].side * 21.4; ball.z = 3.2;
+    ball.vx = ball.vy = ball.vz = 0; ball.live = false; ball.bounces = 0; ball.hitter = sv;
+    S.shots = 0; S.rally = 0; S.trail.length = 0;
+    S.serveMeter = 0; S.serveDir = 1; S.serveLocked = -1;
+    S.mode = 'serve';
+  }
+
+  function doServe(power) {
+    const sv = S.serving, sd = pl[sv].side;
+    const sSign = serveSideOf(sv);
+    const targetSign = -(sv === 0 ? sSign : -sSign); // diagonal box
+    S.serveLocked = power;
+    const lo = opt.assist ? 0.30 : 0.36, hi = opt.assist ? 0.94 : 0.88;
+
+    if (power < lo) {                     // dumped straight into the tape
+      ball.vx = rand(-2, 2); ball.vy = -sd * 45; ball.vz = 6; ball.bounces = 0;
+      ball.live = true; S.shots = 1; S.mode = 'rally'; Audio90.sfx.pop(.4);
+      return;
+    }
+    if (power > hi) {                     // sailed long
+      const tx = clamp(targetSign * rand(2, 7), -9, 9);
+      launch(tx, -sd * rand(24, 27), 1.05, 0);
+      ball.live = true; S.shots = 1; S.mode = 'rally'; Audio90.sfx.pop(.9);
+      return;
+    }
+    const k = (power - lo) / (hi - lo);
+    const depth = 9.5 + k * 11;
+    const tx = clamp(targetSign * rand(2.2, 8), -9.2, 9.2);
+    launch(tx, -sd * depth, 1.0, 0);
+    ball.live = true; S.shots = 1;
+    Audio90.sfx.pop(.6 + k * .4);
+    S.mode = 'rally';
+  }
+
+  // set ball velocity so it lands at (tx,ty) after T seconds
+  function launch(tx, ty, T, arcAdj) {
+    ball.vx = (tx - ball.x) / T;
+    ball.vy = (ty - ball.y) / T;
+    ball.vz = (16 * T * T - ball.z) / T + (arcAdj || 0);
+    ball.bounces = 0;
+  }
+
+  /* ---------------- ball flight prediction ---------------- */
+  function predictLanding() {
+    let x = ball.x, y = ball.y, z = ball.z, vx = ball.vx, vy = ball.vy, vz = ball.vz;
+    const h = 1 / 120;
+    for (let i = 0; i < 900; i++) {
+      vz += GRAV * h; x += vx * h; y += vy * h; z += vz * h;
+      if (z <= 0) return { x: x, y: y, t: i * h, ok: Math.abs(x) <= HALF_W && Math.abs(y) <= HALF_L };
+    }
+    return { x: x, y: y, t: 900 / 120, ok: false };
+  }
+  function timeToPlane(py) {
+    if (Math.abs(ball.vy) < 0.01) return 99;
+    const t = (py - ball.y) / ball.vy;
+    return t > 0 ? t : 99;
+  }
+
+  /* ---------------- hitting ---------------- */
+  function reachX() { return opt.assist ? 3.1 : 2.4; }
+  function reachY() { return opt.assist ? 2.9 : 2.2; }
+
+  // Contact happens when the ball reaches the paddle plane. How far into your
+  // swing that moment lands is the whole game: SWING_IDEAL is the sweet spot.
+  const SWING_LIFE = 0.34, SWING_IDEAL = 0.15;
+  function swingTol() { return opt.assist ? 0.15 : 0.11; }
+
+  function tryContact(p, dt) {
+    if (p.swingT < 0 || !ball.live) return;
+    if (ball.hitter === p.idx) return;
+    if (p.swingDy0 <= 0) return;          // ball was already past us when we swung
+    if (Math.sign(ball.y) !== p.side && Math.abs(ball.y) > 1.5) return;
+
+    const dy = (p.y - ball.y) * p.side;   // >0 = still on its way in
+    if (dy > 0) return;                   // keep swinging, it hasn't got here yet
+    if (dy < -reachY()) return;           // it blew straight past
+    const dx = ball.x - p.x;
+    if (Math.abs(dx) > reachX()) return;
+    if (ball.z > 7.6 || ball.z < -0.2) return;
+
+    const mustBounce = opt.proRules && S.shots < 3;
+    if (mustBounce && ball.bounces === 0) {
+      fault(p.idx, 'LET IT BOUNCE!', 'DOUBLE-BOUNCE RULE');
+      p.swingT = -1;
+      return;
+    }
+    if (ball.bounces === 0 && Math.abs(p.y) < KITCHEN) {
+      fault(p.idx, 'KITCHEN FAULT!', 'NO VOLLEY IN THE NVZ');
+      p.swingT = -1;
+      return;
+    }
+    hit(p, dx);
+  }
+
+  function hit(p, dx) {
+    const tol = swingTol();
+    const tq = clamp(1 - Math.abs(p.swingT - SWING_IDEAL) / tol, 0, 1);
+    const xq = clamp(1 - Math.abs(dx) / reachX(), 0, 1);
+    const q = clamp(tq * 0.68 + xq * 0.32, 0, 1);
+    const early = clamp((p.swingT - SWING_IDEAL) / tol, -1, 1);  // +1 early, -1 late
+    const held = p.swingHeld;
+    const oSide = -p.side;
+
+    S.shots++; S.rally++;
+    ball.hitter = p.idx; ball.bounces = 0;
+    p.lunge = 1; p.cool = 0.16;
+
+    // aim: timing error steers the ball left/right, mirrored per side
+    let aimX = clamp(early * 8.2 * p.side + rand(-1, 1) * (1.6 - q) * 0.8, -9.3, 9.3);
+
+    const nearKitchen = Math.abs(p.y) < 11.5;
+    const low = ball.z < 2.6;
+    let T, depth, type, vol;
+
+    if (held) {                                    // LOB
+      type = 'LOB'; T = 1.62 - q * 0.12;
+      depth = 15 + q * 6; vol = .5;
+      aimX *= 0.6;
+    } else if (nearKitchen && low) {                // DINK
+      type = 'DINK'; T = 0.86;
+      depth = 2.6 + q * 3.2; vol = .35;
+      aimX *= 0.55;
+    } else {                                        // DRIVE
+      type = 'DRIVE';
+      const speedUp = clamp(1 - S.rally * 0.012, 0.8, 1);
+      T = (0.80 - q * 0.16) * speedUp;
+      depth = 11 + q * 9; vol = .55 + q * .45;
+      if (q > 0.84) { type = 'ZINGER'; T *= 0.88; depth += 1.5; }
+    }
+    p.shotType = type;
+
+    const tx = aimX, ty = oSide * depth;
+    launch(tx, ty, T, 0);
+
+    // A decent swing arcs the ball over the tape without changing where it lands:
+    // stretch the flight time and re-solve, rather than just shoving vz up.
+    if (q >= 0.42) {
+      for (let i = 0; i < 8; i++) {
+        const tn = -ball.y / ball.vy;
+        if (tn <= 0) break;
+        const zn = ball.z + ball.vz * tn + 0.5 * GRAV * tn * tn;
+        if (zn > NET_H + 0.25) break;
+        T *= 1.10;
+        launch(tx, ty, T, 0);
+      }
+    } else {
+      ball.vz *= lerp(0.78, 1.0, q / 0.42);   // shanked — may well find the net
+    }
+
+    if (type === 'DINK') Audio90.sfx.dink(); else Audio90.sfx.pop(vol);
+    if (type === 'ZINGER') { shout(pick(RAD), 'PERFECT TIMING'); S.flash = opt.fx ? .35 : 0; S.shake = opt.fx ? 6 : 0; }
+    else if (type === 'LOB') shout('LOB CITY!');
+    else if (type === 'DINK') shout('DINK!');
+  }
+
+  /* ---------------- faults & scoring ---------------- */
+  function fault(loser, msg, sub) {
+    if (S.mode === 'point' || S.mode === 'replay' || S.mode === 'gameover') return;
+    ball.live = false;
+    S.lastPointWinner = 1 - loser;
+    shout(msg, sub || '');
+    Audio90.sfx.whistle();
+    setTimeout(() => Audio90.sfx.fault(), 180);
+
+    const w = 1 - loser;
+    let gameOver = false;
+    if (w === S.serving) {
+      S.score[w]++;
+      if (S.score[w] >= opt.target && S.score[w] - S.score[1 - w] >= 2) gameOver = true;
+    } else {
+      S.serving = w;
+      banner('◄ SIDE OUT ►');
+    }
+
+    S.pointT = 0;
+    const bigPoint = S.rally >= 5 || gameOver ||
+      (S.score[S.serving] >= opt.target - 1 && S.trail.length > 30);
+    if (gameOver) {
+      S.winner = w; S.mode = 'point'; S.pointT = -1; // flagged below
+      setTimeout(() => { if (S.mode === 'point') { S.mode = 'gameover'; S.t = 0; } }, 1500);
+      Audio90.sfx.cheer(true);
+      Audio90.duck(true);
+    } else {
+      Audio90.sfx.cheer(S.rally >= 6);
+      S.mode = (bigPoint && S.trail.length > 24 && opt.fx) ? 'replay' : 'point';
+      S.replayT = 0;
+    }
+  }
+
+  /* ---------------- physics step ---------------- */
+  function stepBall(dt) {
+    if (!ball.live) return;
+    const py = ball.y;
+    ball.vz += GRAV * dt;
+    ball.vx *= (1 - 0.35 * dt); ball.vy *= (1 - 0.35 * dt);
+    ball.x += ball.vx * dt; ball.y += ball.vy * dt; ball.z += ball.vz * dt;
+
+    // net plane
+    if (py !== 0 && Math.sign(ball.y) !== Math.sign(py)) {
+      const f = py / (py - ball.y);
+      const zc = lerp(ball.z - ball.vz * dt, ball.z, f);
+      const xc = lerp(ball.x - ball.vx * dt, ball.x, f);
+      if (zc < NET_H && Math.abs(xc) < HALF_W + 0.8) {
+        ball.x = xc; ball.y = 0; ball.z = Math.max(zc, 0.2);
+        ball.vy *= -0.12; ball.vx *= 0.3; ball.vz = Math.min(ball.vz, 0) * 0.3;
+        Audio90.sfx.net();
+        fault(ball.hitter, 'INTO THE NET!', 'BUMMER');
+        return;
+      }
+    }
+    // ground
+    if (ball.z <= 0) {
+      ball.z = 0;
+      const inX = Math.abs(ball.x) <= HALF_W + 0.15;
+      const inY = Math.abs(ball.y) <= HALF_L + 0.15;
+      ball.vz = -ball.vz * 0.52;
+      ball.vx *= 0.78; ball.vy *= 0.78;
+      if (ball.vz < 2) { ball.vz = 0; }
+      ball.bounces++;
+      Audio90.sfx.bounce();
+
+      // second bounce: the first one already settled in/out, so this is simply
+      // a ball nobody got to. (Checking OUT first would blame the wrong player.)
+      if (ball.bounces >= 2) {
+        const loser = ball.y > 0 ? 0 : 1;
+        const reach = Math.hypot(ball.x - pl[loser].x, ball.y - pl[loser].y);
+        if (S.shots === 1) fault(loser, 'ACE!', 'UNTOUCHED');
+        else if (reach > 6) fault(loser, 'WINNER!', pick(RAD));
+        else fault(loser, 'DOUBLE BOUNCE!', pick(OOF));
+        return;
+      }
+      if (!inX || !inY) { fault(ball.hitter, 'OUT!', inX ? 'LONG' : 'WIDE'); return; }
+
+      // serve must clear the kitchen and land in the diagonal box
+      if (S.shots === 1) {
+        const sv = S.serving, sSign = serveSideOf(sv);
+        const want = -(sv === 0 ? sSign : -sSign);
+        if (Math.abs(ball.y) < KITCHEN) { fault(sv, 'FAULT!', 'SERVE IN THE KITCHEN'); return; }
+        if (Math.sign(ball.x) !== want && Math.abs(ball.x) > 0.6) { fault(sv, 'FAULT!', 'WRONG SERVICE BOX'); return; }
+      }
+    }
+  }
+
+  /* ---------------- players ---------------- */
+  // where the ball will be (in x) when it reaches the plane y = py
+  function xAtPlane(py) {
+    if (Math.abs(ball.vy) < 0.01) return ball.x;
+    const t = clamp((py - ball.y) / ball.vy, 0, 1.4);
+    return ball.x + ball.vx * t;
+  }
+
+  function aimPosition(p, dt) {
+    let tx = p.x, ty = p.y;
+    const incoming = ball.live && Math.sign(ball.vy) === p.side && ball.hitter !== p.idx;
+    if (incoming) {
+      const land = predictLanding();
+      const mine = Math.sign(land.y) === p.side;
+      if (ball.bounces > 0) {
+        // it already bounced on my side — never chase the SECOND bounce backwards.
+        // hold the line if the ball is coming to me, step in if it will die short.
+        const l2 = Math.abs(land.y);
+        ty = (!mine || l2 > Math.abs(p.y)) ? p.y : p.side * clamp(l2 - 1.0, 2.5, 21.5);
+        tx = clamp(xAtPlane(ty), -10.6, 10.6);
+      } else if (mine && land.ok) {
+        // set up a step behind where it will land
+        ty = p.side * clamp(Math.abs(land.y) + 3.0, 8.0, 21.2);
+        tx = clamp(land.x * 0.92, -10.6, 10.6);
+      } else if (mine) {
+        // it's sailing out — hold position and let it go
+        ty = p.side * 20.5;
+        tx = clamp(land.x * 0.5, -10.6, 10.6);
+      } else {
+        // it will carry past me: pick it off in the air
+        ty = p.side * clamp(Math.abs(p.y), 8, 21.2);
+        tx = clamp(xAtPlane(ty), -10.6, 10.6);
+      }
+      // never let auto-positioning walk someone into an illegal kitchen volley
+      if (ball.bounces === 0) ty = p.side * Math.max(Math.abs(ty), KITCHEN + 0.7);
+      if (opt.proRules && S.shots < 3 && ball.bounces === 0)
+        ty = p.side * clamp(Math.abs(ty), 11, 21.2);   // stay back, it has to bounce
+    } else if (ball.live) {
+      // recovering after my own shot — get to the kitchen line like a grown-up
+      tx = lerp(p.x, ball.x * 0.25, 0.6);
+      ty = p.side * (S.shots >= 3 ? 11.5 : 18);
+    }
+    p.tx = tx; p.ty = ty;
+    const sx = (p.human ? 17 : [13, 15.5, 18][opt.cpu]) * dt;
+    const sy = 12 * dt;
+    p.x += clamp(tx - p.x, -sx, sx);
+    p.y += clamp(ty - p.y, -sy, sy);
+    p.x = clamp(p.x, -11.5, 11.5);
+    p.y = p.side > 0 ? clamp(p.y, 1.2, 22.5) : clamp(p.y, -22.5, -1.2);
+  }
+
+  function updateAI(p, dt) {
+    if (!ball.live) {
+      if (S.mode === 'serve' && S.serving === p.idx) {
+        // CPU serves: aims for the green zone with some slop
+        const err = [0.16, 0.08, 0.035][opt.cpu];
+        const want = 0.70 + rand(-err, err);
+        if (S.serveMeter >= want && S.serveDir > 0) doServe(S.serveMeter);
+      }
+      return;
+    }
+    if (Math.sign(ball.vy) !== p.side || ball.hitter === p.idx) { p.aiPlan = -1; return; }
+
+    const tc = timeToPlane(p.y);
+    if (tc > 1.2) return;
+
+    const land = predictLanding();
+    // only judge a ball "out" while it's still in the air — once it has bounced
+    // in, the next landing point is irrelevant and you simply have to play it
+    if (ball.bounces === 0 && !land.ok && Math.sign(land.y) === p.side && opt.cpu >= 1) return;
+    if (opt.proRules && S.shots < 3 && ball.bounces === 0) {
+      const tb = land.t;
+      if (tc < tb + 0.02) return;      // wait for the bounce
+    }
+    if (p.aiPlan < 0) {          // -1 = unplanned, 1 = waiting to swing, 2 = swung
+      const err = [0.10, 0.055, 0.026][opt.cpu];
+      const whiff = [0.10, 0.04, 0.012][opt.cpu];
+      const spd = Math.hypot(ball.vx, ball.vy);
+      const hard = 0.8 + spd / 50;        // fast balls are harder to time
+      p.aiErr = rand(-err, err) * hard + (Math.random() < whiff ? rand(.22, .34) : 0);
+      p.aiHold = Math.random() < (Math.abs(ball.y) > 15 ? 0.16 : 0.05);
+      p.aiPlan = 1;
+    }
+    // re-evaluate every frame: the crossing time moves as the player moves
+    if (p.aiPlan === 1 && tc <= SWING_IDEAL + p.aiErr && p.swingT < 0 && p.cool <= 0) {
+      startSwing(p, p.aiHold); p.aiPlan = 2;
+    }
+  }
+
+  function startSwing(p, held) {
+    p.swingT = 0; p.swingHeld = !!held;
+    // remember whether the ball was still inbound — you can't hit what already passed
+    p.swingDy0 = ball.live ? (p.y - ball.y) * p.side : -1;
+    if (!ball.live || Math.sign(ball.vy) !== p.side) p.swingDy0 = -1;
+  }
+
+  function updatePlayer(p, dt) {
+    p.cool = Math.max(0, p.cool - dt);
+    p.lunge = Math.max(0, p.lunge - dt * 3.2);
+    if (p.swingT >= 0) {
+      p.swingT += dt;
+      if (p.human) p.swingHeld = btn[p.idx].down && (performance.now() - btn[p.idx].t0) > 150;
+      if (p.swingT > SWING_LIFE) { p.swingT = -1; p.cool = Math.max(p.cool, 0.12); }
+    }
+    if (p.human) {
+      if (btn[p.idx].pressed && p.swingT < 0 && p.cool <= 0) startSwing(p, false);
+    } else updateAI(p, dt);
+    aimPosition(p, dt);
+    tryContact(p, dt);
+  }
+
+  /* ---------------- menus (one-switch friendly) ---------------- */
+  const MENU = [
+    { k: 'players', label: 'PLAYERS', vals: ['1P vs CPU', '2 PLAYER'], get: () => opt.players - 1, set: v => opt.players = v + 1 },
+    { k: 'cpu', label: 'CPU LEVEL', vals: CPU_NAMES, get: () => opt.cpu, set: v => opt.cpu = v, hide: () => opt.players === 2 },
+    { k: 'target', label: 'GAME TO', vals: ['7', '11', '15'], get: () => [7, 11, 15].indexOf(opt.target), set: v => opt.target = [7, 11, 15][v] },
+    { k: 'assist', label: 'TIMING ASSIST', vals: ['OFF', 'ON'], get: () => opt.assist ? 1 : 0, set: v => opt.assist = !!v },
+    { k: 'pro', label: 'PRO RULES', vals: ['OFF', 'ON'], get: () => opt.proRules ? 1 : 0, set: v => opt.proRules = !!v },
+    { k: 'radio', label: 'RADIO', vals: null, get: () => Audio90.station, set: v => Audio90.setStation(v) },
+    { k: 'fx', label: 'SCREEN FX', vals: ['REDUCED', 'FULL'], get: () => opt.fx ? 1 : 0, set: v => { opt.fx = !!v; document.body.classList.toggle('reduced', !opt.fx); } },
+    { k: 'howto', label: '► HOW TO PLAY', vals: null },
+    { k: 'start', label: '► START MATCH', vals: null }
+  ];
+  function visibleMenu() { return MENU.filter(m => !m.hide || !m.hide()); }
+  function menuMove(d) {
+    if (S.mode !== 'menu') return;
+    const v = visibleMenu();
+    S.menuIdx = (S.menuIdx + d + v.length) % v.length;
+    Audio90.sfx.ui();
+  }
+  function menuAdjust(d) {
+    if (S.mode !== 'menu') return;
+    const m = visibleMenu()[S.menuIdx];
+    if (m.k === 'radio') { Audio90.setStation(Audio90.station + d); return; }
+    if (!m.vals) { activate(m); return; }
+    const n = m.vals.length;
+    m.set((m.get() + d + n) % n); Audio90.sfx.ui();
+  }
+  function activate(m) {
+    if (!m) return;
+    if (m.k === 'start') { startMatch(); return; }
+    if (m.k === 'howto') { S.mode = 'howto'; Audio90.sfx.confirm(); return; }
+    if (m.k === 'radio') { Audio90.setStation(Audio90.station + 1); return; }
+    if (!m.vals) return;
+    menuAdjust(1);
+  }
+  // menu rows are clickable too — keep this in sync with drawMenu()
+  const MENU_TOP = 118, MENU_ROW = 42;
+  function menuRowAt(lx, ly) {
+    if (lx < 176 || lx > 784) return -1;
+    const i = Math.floor((ly - MENU_TOP + 3) / MENU_ROW);
+    return (i >= 0 && i < visibleMenu().length && ly >= MENU_TOP - 3) ? i : -1;
+  }
+  function startMatch() {
+    S.score = [0, 0]; S.serving = 0; S.winner = -1; S.recT = 0;
+    pl[0].human = true;
+    pl[1].human = opt.players === 2;
+    Audio90.sfx.confirm(); Audio90.duck(false);
+    setupServe();
+    banner('GAME ON! FIRST TO ' + opt.target + ', WIN BY 2');
+  }
+  // shared by "hold your button" and the Enter key
+  function confirmAction() {
+    if (S.mode === 'menu') activate(visibleMenu()[S.menuIdx]);
+    else if (S.mode === 'howto') { S.mode = 'menu'; Audio90.sfx.ui(); }
+    else if (S.mode === 'title') { S.mode = 'menu'; Audio90.sfx.confirm(); }
+    else if (S.mode === 'gameover') { S.mode = 'menu'; S.menuIdx = 0; Audio90.duck(false); Audio90.sfx.confirm(); }
+    else if (S.mode === 'pause') togglePause();
+  }
+  function togglePause() {
+    if (S.mode === 'pause') { S.mode = S.prev; Audio90.duck(false); }
+    else if (['serve', 'rally', 'point', 'replay'].indexOf(S.mode) >= 0) {
+      S.prev = S.mode; S.mode = 'pause'; Audio90.duck(true); Audio90.sfx.ui();
+    }
+  }
+
+  /* ---------------- update ---------------- */
+  function update(dt) {
+    S.t += dt;
+    S.msgT = Math.max(0, S.msgT - dt);
+    S.bannerT = Math.max(0, S.bannerT - dt);
+    S.shake = Math.max(0, S.shake - dt * 22);
+    S.flash = Math.max(0, S.flash - dt * 2.2);
+    pollPads();
+
+    // one-switch UI: tap = next, hold = activate
+    btn.forEach((b, i) => {
+      if (b.down && !b.holdFired && performance.now() - b.t0 > HOLD_MS) {
+        b.holdFired = true;
+        confirmAction();
+      }
+      if (b.released && !b.holdFired) {
+        if (S.mode === 'menu') menuMove(1);
+        else if (S.mode === 'title') { S.mode = 'menu'; Audio90.sfx.confirm(); }
+        else if (S.mode === 'howto') { S.mode = 'menu'; Audio90.sfx.ui(); }
+        else if (S.mode === 'gameover') { S.mode = 'menu'; S.menuIdx = 0; Audio90.duck(false); }
+      }
+    });
+
+    if (S.mode === 'title' || S.mode === 'menu' || S.mode === 'howto' || S.mode === 'pause') { clearEdges(); return; }
+
+    S.recT += dt;
+
+    if (S.mode === 'serve') {
+      const sp = opt.assist ? 0.95 : 1.25;
+      S.serveMeter += S.serveDir * dt * sp;
+      if (S.serveMeter > 1) { S.serveMeter = 1; S.serveDir = -1; }
+      if (S.serveMeter < 0) { S.serveMeter = 0; S.serveDir = 1; }
+      const sv = S.serving;
+      if (pl[sv].human && btn[sv].pressed) doServe(S.serveMeter);
+      else if (!pl[sv].human) updateAI(pl[sv], dt);
+      if (S.mode === 'serve') {          // still winding up — ball rests in the server's hand
+        ball.x = pl[sv].x * 0.94; ball.y = pl[sv].side * 21.4;
+        ball.z = 3.0 + Math.sin(S.t * 3) * 0.15;
+      }
+      pl.forEach(p => { if (p.idx !== sv) aimPosition(p, dt); });
+      clearEdges();
+      return;
+    }
+
+    if (S.mode === 'point' || S.mode === 'replay') {
+      S.pointT += dt;
+      if (S.mode === 'replay') {
+        S.replayT += dt;
+        if (S.replayT > 2.5) { S.mode = 'point'; S.pointT = 0.9; }
+      } else if (S.pointT > 1.5 && S.winner < 0) setupServe();
+      clearEdges();
+      return;
+    }
+
+    // rally
+    const sub = 2, h = dt / sub;
+    for (let i = 0; i < sub; i++) {
+      pl.forEach(p => updatePlayer(p, h));
+      stepBall(h);
+      if (S.mode !== 'rally') break;
+    }
+    if (ball.live && S.trail.length < 400) {
+      S.trail.push({ x: ball.x, y: ball.y, z: ball.z });
+      if (S.trail.length > 260) S.trail.shift();
+    }
+    clearEdges();
+  }
+
+  /* ---------------- rendering ---------------- */
+  function drawCourt() {
+    // apron
+    ctx.save();
+    const apron = [[-16.5, -27], [16.5, -27], [16.5, 27], [-16.5, 27]];
+    poly(apron, '#123f4a');
+    // hash texture
+    ctx.globalAlpha = .18;
+    for (let y = -26; y < 27; y += 4) {
+      const a = proj(-16.5, y, 0), b = proj(16.5, y, 0);
+      ctx.strokeStyle = '#0a2a33'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // playing surface
+    poly([[-HALF_W, -HALF_L], [HALF_W, -HALF_L], [HALF_W, HALF_L], [-HALF_W, HALF_L]], '#2f6fb5');
+    // kitchens in hot purple
+    poly([[-HALF_W, -KITCHEN], [HALF_W, -KITCHEN], [HALF_W, 0], [-HALF_W, 0]], '#7a3fd4');
+    poly([[-HALF_W, 0], [HALF_W, 0], [HALF_W, KITCHEN], [-HALF_W, KITCHEN]], '#7a3fd4');
+
+    // lines
+    ctx.lineWidth = 3;
+    const L = (x1, y1, x2, y2, c, w) => {
+      const a = proj(x1, y1, 0), b = proj(x2, y2, 0);
+      ctx.strokeStyle = c || '#fff'; ctx.lineWidth = w || 3.2;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    };
+    L(-HALF_W, -HALF_L, HALF_W, -HALF_L); L(-HALF_W, HALF_L, HALF_W, HALF_L);
+    L(-HALF_W, -HALF_L, -HALF_W, HALF_L); L(HALF_W, -HALF_L, HALF_W, HALF_L);
+    L(-HALF_W, -KITCHEN, HALF_W, -KITCHEN, '#ffe83d', 3.4);
+    L(-HALF_W, KITCHEN, HALF_W, KITCHEN, '#ffe83d', 3.4);
+    L(0, -HALF_L, 0, -KITCHEN); L(0, KITCHEN, 0, HALF_L);
+    ctx.restore();
+  }
+  function poly(pts, fill) {
+    ctx.beginPath();
+    pts.forEach((p, i) => { const q = proj(p[0], p[1], 0); i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); });
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+  }
+
+  function drawNet() {
+    const lp = proj(-HALF_W - 0.6, 0, 0), rp = proj(HALF_W + 0.6, 0, 0);
+    const lt = proj(-HALF_W - 0.6, 0, 3.1), rt = proj(HALF_W + 0.6, 0, 3.1);
+    const ct = proj(0, 0, NET_H);
+    ctx.save();
+    // mesh
+    ctx.beginPath();
+    ctx.moveTo(lt.x, lt.y); ctx.quadraticCurveTo(ct.x, ct.y + 2, rt.x, rt.y);
+    ctx.lineTo(rp.x, rp.y); ctx.lineTo(lp.x, lp.y); ctx.closePath();
+    ctx.fillStyle = 'rgba(12,10,30,.42)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(200,220,255,.35)'; ctx.lineWidth = 1;
+    for (let i = 0; i <= 28; i++) {
+      const x = -HALF_W - 0.6 + (2 * (HALF_W + 0.6)) * i / 28;
+      const top = proj(x, 0, lerpNet(x)), bot = proj(x, 0, 0);
+      ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(bot.x, bot.y); ctx.stroke();
+    }
+    for (let j = 1; j < 6; j++) {
+      ctx.beginPath();
+      for (let i = 0; i <= 20; i++) {
+        const x = -HALF_W - 0.6 + (2 * (HALF_W + 0.6)) * i / 20;
+        const q = proj(x, 0, lerpNet(x) * j / 6);
+        i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y);
+      }
+      ctx.stroke();
+    }
+    // white tape
+    ctx.lineWidth = 5; ctx.strokeStyle = '#fff';
+    ctx.beginPath();
+    for (let i = 0; i <= 24; i++) {
+      const x = -HALF_W - 0.6 + (2 * (HALF_W + 0.6)) * i / 24;
+      const q = proj(x, 0, lerpNet(x));
+      i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y);
+    }
+    ctx.stroke();
+    // posts
+    [[-HALF_W - 0.6], [HALF_W + 0.6]].forEach(a => {
+      const b = proj(a[0], 0, 0), t = proj(a[0], 0, 3.1);
+      ctx.strokeStyle = '#ff2e97'; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(t.x, t.y); ctx.stroke();
+    });
+    ctx.restore();
+  }
+  function lerpNet(x) { return NET_H + Math.abs(x) / (HALF_W + 0.6) * 0.26; }
+
+  function drawShadow(x, y, z) {
+    const q = proj(x, y, 0);
+    const k = clamp(1 - z / 16, 0.25, 1);
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,' + (0.32 * k) + ')';
+    ctx.beginPath();
+    ctx.ellipse(q.x, q.gy, 9 * q.s * k, 4 * q.s * k, 0, 0, 7);
+    ctx.fill(); ctx.restore();
+  }
+
+  const SKIN = ['#f2c49b', '#8d5524'];
+  function drawPlayer(p) {
+    const q = proj(p.x, p.y, 0);
+    const s = q.s * 1.55;
+    const c1 = p.idx === 0 ? '#ff2e97' : '#8dff3a';
+    const c2 = p.idx === 0 ? '#00f0ff' : '#ff8a1e';
+    drawShadow(p.x, p.y, 0);
+    ctx.save();
+    ctx.translate(q.x, q.gy);
+    ctx.scale(s, s);
+    const bob = Math.sin(S.t * 7 + p.idx) * 0.6 * (opt.fx ? 1 : 0);
+    // legs
+    ctx.fillStyle = '#2a1a4a';
+    ctx.fillRect(-6, -14, 4.5, 14); ctx.fillRect(1.5, -14, 4.5, 14);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(-7, -3, 6, 4); ctx.fillRect(1, -3, 6, 4);      // chunky sneakers
+    // shorts (loud, baggy, 1995)
+    ctx.fillStyle = c2;
+    ctx.fillRect(-7.5, -23 + bob, 15, 10);
+    ctx.fillStyle = c1;
+    for (let i = 0; i < 3; i++) ctx.fillRect(-7.5, -21 + i * 3.2 + bob, 15, 1.4);
+    // torso
+    ctx.fillStyle = c1;
+    ctx.fillRect(-6.5, -34 + bob, 13, 12);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(-6.5, -30 + bob, 13, 2.2);
+    // head + headband
+    ctx.fillStyle = SKIN[p.idx];
+    ctx.beginPath(); ctx.arc(0, -39 + bob, 5.2, 0, 7); ctx.fill();
+    ctx.fillStyle = c2; ctx.fillRect(-5.4, -42 + bob, 10.8, 2.6);
+    // arm + paddle
+    const sw = p.swingT >= 0 ? clamp(p.swingT / 0.2, 0, 1) : (p.lunge > 0 ? 1 - p.lunge : 0);
+    const armA = lerp(-0.9, 1.5, sw);
+    const side = ball.x > p.x ? 1 : -1;
+    ctx.save();
+    ctx.translate(5 * side, -31 + bob);
+    ctx.rotate(armA * side);
+    ctx.strokeStyle = SKIN[p.idx]; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(7 * side, 3); ctx.stroke();
+    ctx.translate(9 * side, 4);
+    ctx.fillStyle = '#1a1030';
+    ctx.fillRect(-3.4 * side, -1.5, 3 * side, 3);
+    ctx.fillStyle = p.idx === 0 ? '#ffe83d' : '#00f0ff';
+    ctx.beginPath(); ctx.ellipse(2.5 * side, 0, 5.2, 6.4, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.1; ctx.stroke();
+    ctx.restore();
+    ctx.restore();
+
+    // timing ring — the heart of the one-button scheme
+    if (p.human && opt.assist && ball.live && Math.sign(ball.vy) === p.side && ball.hitter !== p.idx) {
+      let tc = timeToPlane(p.y);
+      const mb = opt.proRules && S.shots < 3 && ball.bounces === 0;
+      if (mb) { const land = predictLanding(); if (tc < land.t) tc = 99; }
+      if (tc < 0.95) {
+        // ring meets the white circle exactly when it's time to press
+        const k = clamp((tc - SWING_IDEAL) / (0.95 - SWING_IDEAL), 0, 1);
+        const r = lerp(15, 62, k) * q.s;
+        ctx.save();
+        ctx.translate(q.x, q.gy - 26 * q.s);
+        ctx.strokeStyle = k < 0.13 ? '#ffe83d' : (p.idx === 0 ? '#00f0ff' : '#8dff3a');
+        ctx.lineWidth = k < 0.13 ? 5 : 3;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.globalAlpha = .55;
+        ctx.beginPath(); ctx.arc(0, 0, 15 * q.s, 0, 7); ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawBall() {
+    const q = proj(ball.x, ball.y, ball.z);
+    drawShadow(ball.x, ball.y, ball.z);
+    const r = 6.2 * q.s;
+    ctx.save();
+    if (opt.fx) {
+      const sp = Math.hypot(ball.vx, ball.vy) / 45;
+      if (sp > 0.5) {
+        ctx.globalAlpha = .3; ctx.fillStyle = '#ffe83d';
+        for (let i = 1; i <= 3; i++) {
+          const b = proj(ball.x - ball.vx * i * .012, ball.y - ball.vy * i * .012, Math.max(0, ball.z - ball.vz * i * .012));
+          ctx.beginPath(); ctx.arc(b.x, b.y, r * (1 - i * .22), 0, 7); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.fillStyle = '#f7ff45';
+    ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#8a8f10'; ctx.lineWidth = 1.2; ctx.stroke();
+    // wiffle holes
+    ctx.fillStyle = 'rgba(120,120,20,.55)';
+    for (let i = 0; i < 4; i++) {
+      const a = S.t * 4 + i * 1.57;
+      ctx.beginPath(); ctx.arc(q.x + Math.cos(a) * r * .45, q.y + Math.sin(a) * r * .38, r * .17, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+
+    // landing marker
+    if (opt.assist && ball.live && ball.z > 0.4) {
+      const land = predictLanding();
+      const m = proj(land.x, land.y, 0);
+      ctx.save();
+      ctx.strokeStyle = land.ok ? 'rgba(255,255,255,.75)' : 'rgba(255,60,60,.8)';
+      ctx.lineWidth = 2.5; ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.ellipse(m.x, m.gy, 13 * m.s, 6 * m.s, 0, 0, 7); ctx.stroke();
+      ctx.setLineDash([]); ctx.restore();
+    }
+  }
+
+  function drawScene() {
+    Art.backdrop(ctx, W, H, S.t, opt.fx);
+    Art.crowd(ctx, W, S.t, FAR_Y - 6, opt.fx);
+    drawCourt();
+    const ents = [];
+    ents.push({ y: pl[1].y, f: () => drawPlayer(pl[1]) });
+    ents.push({ y: pl[0].y, f: () => drawPlayer(pl[0]) });
+    ents.push({ y: 0, f: drawNet });
+    if (S.mode !== 'replay') ents.push({ y: ball.y, f: drawBall });
+    ents.sort((a, b) => a.y - b.y).forEach(e => e.f());
+    if (S.mode === 'replay') drawReplay();
+  }
+
+  function drawReplay() {
+    const n = S.trail.length;
+    if (!n) return;
+    const k = clamp(S.replayT / 2.1, 0, 1);
+    const idx = Math.floor(k * (n - 1));
+    ctx.save();
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,232,61,.5)';
+    ctx.beginPath();
+    for (let i = Math.max(0, idx - 60); i <= idx; i++) {
+      const p = S.trail[i], q = proj(p.x, p.y, p.z);
+      i === Math.max(0, idx - 60) ? ctx.moveTo(q.x, q.y) : ctx.lineTo(q.x, q.y);
+    }
+    ctx.stroke();
+    const p = S.trail[idx], q = proj(p.x, p.y, p.z);
+    drawShadow(p.x, p.y, p.z);
+    ctx.fillStyle = '#f7ff45';
+    ctx.beginPath(); ctx.arc(q.x, q.y, 6.4 * q.s, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---------------- HUD ---------------- */
+  function drawScoreboard() {
+    Art.panel(ctx, 300, 8, 360, 54, '#1a0b2e', '#00f0ff');
+    const sv = S.serving;
+    for (let i = 0; i < 2; i++) {
+      const x = i === 0 ? 372 : 588;
+      const col = i === 0 ? '#ff2e97' : '#8dff3a';
+      Art.label(ctx, i === 0 ? 'P1' : (opt.players === 2 ? 'P2' : 'CPU'), x, 24, 17, col);
+      Art.chunky(ctx, String(S.score[i]), x, 56, { size: 34, fill: '#fff', depth: 2, align: 'center' });
+      if (sv === i) {
+        ctx.save(); ctx.fillStyle = '#ffe83d';
+        ctx.beginPath();
+        const bx = x + 30, by = 45;
+        ctx.moveTo(bx, by - 8); ctx.lineTo(bx + 11, by); ctx.lineTo(bx, by + 8);
+        ctx.closePath(); ctx.fill(); ctx.restore();
+      }
+    }
+    Art.label(ctx, '—', 480, 44, 26, '#6b4fa0');
+    Art.label(ctx, 'GAME TO ' + opt.target, 480, 20, 13, '#b58fe8');
+    if (S.rally > 3 && S.mode === 'rally')
+      Art.label(ctx, 'RALLY x' + S.rally, 480, 76, 20, S.rally > 8 ? '#ffe83d' : '#00f0ff');
+  }
+
+  function drawRadio() {
+    const st = Audio90.stations[Audio90.station];
+    const x = 16, y = 520, w = 250, h = 52;
+    Art.panel(ctx, x, y, w, h, '#20103d', st.color);
+    Art.label(ctx, st.dial, x + 12, y + 18, 20, st.color, 'left');
+    Art.label(ctx, st.name, x + 74, y + 18, 20, '#fff', 'left');
+    Art.label(ctx, Audio90.muted ? 'MUTED — [N]' : st.genre, x + 12, y + 38, 14, '#c9a7ff', 'left');
+    // EQ bars
+    for (let i = 0; i < 9; i++) {
+      const on = st.play && !Audio90.muted;
+      const hgt = on ? 4 + Math.abs(Math.sin(S.t * (5 + i * 0.7) + i)) * 17 : 3;
+      ctx.fillStyle = i % 3 === 0 ? st.color : '#ffffff';
+      ctx.globalAlpha = .85;
+      ctx.fillRect(x + w - 104 + i * 11, y + h - 10 - hgt, 7, hgt);
+    }
+    ctx.globalAlpha = 1;
+    Art.label(ctx, '[M] TUNE', x + w - 12, y + 13, 12, '#8f7ac0', 'right');
+  }
+
+  function drawServeMeter() {
+    const sv = S.serving;
+    const x = 300, y = 546, w = 360, h = 26;
+    Art.panel(ctx, x, y, w, h, '#150a28', '#ffe83d');
+    const lo = opt.assist ? 0.30 : 0.36, hi = opt.assist ? 0.94 : 0.88;
+    ctx.save();
+    ctx.fillStyle = '#c02040'; ctx.fillRect(x + 4, y + 4, (lo) * (w - 8), h - 8);
+    ctx.fillStyle = '#2fc04a'; ctx.fillRect(x + 4 + lo * (w - 8), y + 4, (hi - lo) * (w - 8), h - 8);
+    ctx.fillStyle = '#c02040'; ctx.fillRect(x + 4 + hi * (w - 8), y + 4, (1 - hi) * (w - 8), h - 8);
+    const mx = x + 4 + S.serveMeter * (w - 8);
+    ctx.fillStyle = '#fff'; ctx.fillRect(mx - 3, y - 4, 6, h + 8);
+    ctx.fillStyle = '#000'; ctx.fillRect(mx - 1, y - 4, 2, h + 8);
+    ctx.restore();
+    const who = pl[sv].human ? (sv === 0 ? 'P1' : 'P2') : 'CPU';
+    Art.label(ctx, who + ' SERVES FROM THE ' + (serveSideOf(sv) > 0 ? 'RIGHT' : 'LEFT') +
+      (pl[sv].human ? ' — PRESS IN THE GREEN' : ''), 480, y - 14, 19, '#ffe83d');
+    // big arrow over the server so you know whose turn it is
+    const q = proj(pl[sv].x, pl[sv].side * 21.8, 0);
+    const bob = Math.sin(S.t * 6) * 5;
+    ctx.save();
+    ctx.fillStyle = '#ffe83d';
+    ctx.beginPath();
+    ctx.moveTo(q.x, q.gy - 66 * q.s + bob);
+    ctx.lineTo(q.x - 11, q.gy - 84 * q.s + bob);
+    ctx.lineTo(q.x + 11, q.gy - 84 * q.s + bob);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawMessages() {
+    if (S.msgT > 0) {
+      const k = 1 - S.msgT / 1.6;
+      const pop = S.msgT > 1.35 ? lerp(1.5, 1, (1.6 - S.msgT) / 0.25) : 1;
+      ctx.save();
+      ctx.globalAlpha = clamp(S.msgT * 2, 0, 1);
+      ctx.translate(480, 200 - k * 26);
+      ctx.scale(pop, pop);
+      Art.chunky(ctx, S.msg, 0, 0, {
+        size: 62, fill: ['#fff', '#ffe83d', '#ff8a1e'], outline: '#000', outlineW: 6,
+        rot: -0.05, chroma: opt.fx, depth: 5
+      });
+      if (S.msgSub) Art.chunky(ctx, S.msgSub, 0, 34, { size: 24, fill: '#00f0ff', outline: '#000', outlineW: 4, depth: 2 });
+      ctx.restore();
+    }
+    if (S.bannerT > 0) {
+      ctx.save();
+      ctx.globalAlpha = clamp(S.bannerT * 2.2, 0, 1);
+      Art.panel(ctx, 210, 96, 540, 40, '#000', '#ff2e97');
+      Art.label(ctx, S.banner, 480, 117, 22, '#ffe83d');
+      ctx.restore();
+    }
+  }
+
+  /* ---------------- screens ---------------- */
+  function drawPickle(x, y, s, t) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+    ctx.rotate(Math.sin(t * 1.6) * 0.07);
+    ctx.fillStyle = '#4e9e2f';
+    ctx.beginPath(); ctx.ellipse(0, 0, 26, 40, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#7ec850';
+    ctx.beginPath(); ctx.ellipse(-6, -4, 16, 30, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#39761f';
+    for (let i = 0; i < 7; i++) {
+      const a = i / 7 * 6.28;
+      ctx.beginPath(); ctx.ellipse(Math.cos(a) * 13, Math.sin(a) * 26, 3, 4, 0, 0, 7); ctx.fill();
+    }
+    // shades
+    ctx.fillStyle = '#111'; ctx.fillRect(-19, -16, 38, 12);
+    ctx.fillStyle = '#ff2e97'; ctx.fillRect(-17, -14, 14, 8); ctx.fillRect(3, -14, 14, 8);
+    ctx.fillStyle = '#111'; ctx.fillRect(-19, -19, 38, 3);
+    // grin
+    ctx.strokeStyle = '#1d4a12'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(0, 4, 9, 0.25, 2.9); ctx.stroke();
+    // paddle
+    ctx.save(); ctx.translate(30, 6); ctx.rotate(-0.5 + Math.sin(t * 3) * .2);
+    ctx.fillStyle = '#ffe83d'; ctx.beginPath(); ctx.ellipse(0, -10, 11, 14, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#7a3fd4'; ctx.fillRect(-3, 2, 6, 12);
+    ctx.restore();
+    ctx.restore();
+  }
+
+  function drawTitle() {
+    Art.backdrop(ctx, W, H, S.t, opt.fx);
+    ctx.save();
+    if (opt.fx) Art.starburst(ctx, 480, 190, 250, 150, 16, 'rgba(255,46,151,.35)', S.t * .25);
+    ctx.restore();
+    Art.chunky(ctx, 'PICKLE', 480, 170, {
+      size: 108, fill: ['#ffe83d', '#ff8a1e', '#ff2e97'], outline: '#000', outlineW: 9,
+      rot: -0.04, chroma: opt.fx, depth: 9
+    });
+    Art.chunky(ctx, "JAM '95", 480, 268, {
+      size: 96, fill: ['#00f0ff', '#8dff3a'], outline: '#000', outlineW: 8,
+      rot: 0.03, chroma: opt.fx, depth: 8
+    });
+    Art.panel(ctx, 300, 296, 360, 34, '#000', '#ffe83d');
+    Art.label(ctx, 'THE EXTREME PADDLE EXPERIENCE', 480, 314, 19, '#8dff3a');
+    drawPickle(788, 210, 1.25, S.t);
+    drawPickle(158, 220, 1.0, S.t + 1.4);
+
+    const bl = Math.sin(S.t * 4) > -0.3;
+    if (bl) Art.chunky(ctx, 'PRESS YOUR BUTTON', 480, 420, { size: 40, fill: '#fff', outline: '#ff2e97', outlineW: 5, depth: 3 });
+    Art.label(ctx, 'P1 = [A]  or  LEFT SIDE OF SCREEN            P2 = [L]  or  RIGHT SIDE', 480, 462, 17, '#c9a7ff');
+    Art.label(ctx, 'TAP = NEXT      HOLD = SELECT', 480, 488, 17, '#ffe83d');
+    Art.label(ctx, '© 1995 NO COAST GAMES — ALL RIGHTS RESERVED, DUDE', 480, 570, 14, '#6b4fa0');
+    Art.recDot(ctx, 24, 28, S.t, S.t);
+  }
+
+  function drawMenu() {
+    Art.backdrop(ctx, W, H, S.t, opt.fx);
+    Art.chunky(ctx, 'OPTIONS', 480, 74, { size: 54, fill: ['#ffe83d', '#ff8a1e'], outline: '#000', outlineW: 6, rot: -0.02, depth: 5 });
+    const v = visibleMenu();
+    S.menuIdx = clamp(S.menuIdx, 0, v.length - 1);
+    const top = MENU_TOP, rowH = MENU_ROW;
+    v.forEach((m, i) => {
+      const y = top + i * rowH, sel = i === S.menuIdx;
+      if (sel) {
+        Art.panel(ctx, 176, y - 3, 608, 36, '#4a1a8a', '#00f0ff');
+        ctx.save(); ctx.fillStyle = '#ffe83d';
+        const px = 196 + Math.sin(S.t * 8) * 4;
+        ctx.beginPath(); ctx.moveTo(px, y + 6); ctx.lineTo(px + 13, y + 15); ctx.lineTo(px, y + 24); ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+      Art.label(ctx, m.label, 226, y + 16, 24, sel ? '#fff' : '#b58fe8', 'left');
+      let val = '';
+      if (m.k === 'radio') { const st = Audio90.stations[Audio90.station]; val = st.dial + ' ' + st.name; }
+      else if (m.vals) val = m.vals[m.get()];
+      if (val) Art.label(ctx, '◄ ' + val + ' ►', 700, y + 16, 22, sel ? '#ffe83d' : '#8dff3a', 'center');
+    });
+    Art.panel(ctx, 176, 500, 608, 66, '#1a0b2e', '#ff2e97');
+    Art.label(ctx, 'TAP your button = MOVE DOWN        HOLD your button = CHANGE / SELECT', 480, 522, 17, '#fff');
+    Art.label(ctx, 'or use ARROW KEYS + the mouse.  [M] tunes the radio anytime.', 480, 548, 16, '#c9a7ff');
+  }
+
+  function drawHowTo() {
+    Art.backdrop(ctx, W, H, S.t, opt.fx);
+    Art.chunky(ctx, 'HOW TO JAM', 480, 66, { size: 48, fill: ['#00f0ff', '#8dff3a'], outline: '#000', outlineW: 6, depth: 4 });
+    const lines = [
+      ['YOU ONLY GET ONE BUTTON.', '#ffe83d'],
+      ['Your player runs to the ball automatically. All you do is swing.', '#fff'],
+      ['', ''],
+      ['TAP  — drive the ball deep.', '#8dff3a'],
+      ['HOLD — lob it high over their head.', '#8dff3a'],
+      ['TAP when the ball is low at the kitchen line — that is a DINK.', '#8dff3a'],
+      ['', ''],
+      ['TIMING IS EVERYTHING', '#ffe83d'],
+      ['Press when the shrinking ring hits the white circle = ZINGER.', '#fff'],
+      ['Press early and the ball goes one way. Late, the other. Use it to aim.', '#fff'],
+      ['', ''],
+      ['THE RULES (yes, real ones)', '#ffe83d'],
+      ['Only the SERVER can score. Lose the rally on serve = SIDE OUT.', '#fff'],
+      ['Serve must clear the purple kitchen, diagonally. Deep is better.', '#fff'],
+      ['PRO RULES: serve and return must bounce before anyone smacks it.', '#fff'],
+      ['No volleying while standing in the kitchen. Ever.', '#fff']
+    ];
+    lines.forEach((l, i) => {
+      if (!l[0]) return;
+      Art.label(ctx, l[0], 480, 112 + i * 27, l[1] === '#ffe83d' ? 23 : 19, l[1]);
+    });
+    Art.label(ctx, 'HOLD your button to go back', 480, 572, 20, '#ff2e97');
+  }
+
+  function drawPause() {
+    ctx.save(); ctx.fillStyle = 'rgba(10,4,22,.78)'; ctx.fillRect(0, 0, W, H);
+    Art.chunky(ctx, 'PAUSED', 480, 250, { size: 88, fill: ['#fff', '#00f0ff'], outline: '#000', outlineW: 8, chroma: opt.fx, depth: 6, rot: -0.03 });
+    Art.label(ctx, 'HOLD your button — or press ESC — to resume', 480, 320, 22, '#ffe83d');
+    Art.label(ctx, '[M] change station     [N] mute', 480, 356, 18, '#c9a7ff');
+    ctx.restore();
+  }
+
+  function drawGameOver() {
+    ctx.save(); ctx.fillStyle = 'rgba(10,4,22,.7)'; ctx.fillRect(0, 0, W, H);
+    if (opt.fx) Art.starburst(ctx, 480, 230, 300, 180, 18, 'rgba(255,232,61,.22)', -S.t * .3);
+    const w = S.winner;
+    const who = w === 0 ? 'PLAYER 1' : (opt.players === 2 ? 'PLAYER 2' : 'THE CPU');
+    Art.chunky(ctx, 'GAME!', 480, 160, { size: 92, fill: ['#ffe83d', '#ff2e97'], outline: '#000', outlineW: 8, chroma: opt.fx, depth: 7, rot: -0.04 });
+    Art.chunky(ctx, who + ' WINS', 480, 250, { size: 54, fill: '#fff', outline: '#000', outlineW: 6, depth: 4 });
+    Art.chunky(ctx, S.score[0] + ' — ' + S.score[1], 480, 330, { size: 68, fill: ['#00f0ff', '#8dff3a'], outline: '#000', outlineW: 6, depth: 5 });
+    Art.label(ctx, pick(RAD), 480, 380, 30, '#ff8a1e');
+    Art.label(ctx, 'HOLD your button for the menu', 480, 470, 24, '#ffe83d');
+    ctx.restore();
+  }
+
+  /* ---------------- main draw ---------------- */
+  function draw() {
+    ctx.save();
+    if (S.shake > 0 && opt.fx) ctx.translate(rand(-S.shake, S.shake), rand(-S.shake, S.shake));
+    ctx.clearRect(-20, -20, W + 40, H + 40);
+
+    if (S.mode === 'title') { drawTitle(); ctx.restore(); return; }
+    if (S.mode === 'menu') { drawMenu(); ctx.restore(); return; }
+    if (S.mode === 'howto') { drawHowTo(); ctx.restore(); return; }
+
+    drawScene();
+    drawScoreboard();
+    drawRadio();
+    if (S.mode === 'serve') drawServeMeter();
+    drawMessages();
+    Art.recDot(ctx, 24, 28, S.t, S.recT);
+
+    if (S.mode === 'replay') {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,.35)';
+      ctx.fillRect(0, 0, W, 34); ctx.fillRect(0, H - 34, W, 34);
+      const bl = (S.t * 3 % 1) < .6;
+      if (bl) Art.label(ctx, '◄◄  INSTANT REPLAY', 152, 17, 22, '#ffe83d');
+      Art.label(ctx, 'NO COAST SPORTS NETWORK', 480, H - 16, 18, '#00f0ff');
+      ctx.restore();
+    }
+    if (S.mode === 'pause') drawPause();
+    if (S.mode === 'gameover') drawGameOver();
+
+    if (S.flash > 0 && opt.fx) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (S.flash * .5) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.restore();
+
+    // player key reminders along the bottom edge
+    if (['serve', 'rally', 'point'].indexOf(S.mode) >= 0) {
+      Art.label(ctx, 'P1 [A]', 84, 586, 18, '#ff2e97');
+      Art.label(ctx, opt.players === 2 ? 'P2 [L]' : 'CPU: ' + CPU_NAMES[opt.cpu], 876, 586, 18, '#8dff3a');
+      Art.label(ctx, '[ESC] PAUSE', 480, 586, 15, '#6b4fa0');
+    }
+  }
+
+  /* ---------------- loop ---------------- */
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  Audio90.setStation(3);   // boot up on PULSE 99.7
+  window.PJ = { S: S, pl: pl, ball: ball, opt: opt, startMatch: startMatch };  // debug hook
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
