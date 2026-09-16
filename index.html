@@ -785,12 +785,25 @@ const Art = (function () {
   const GRAV = -32;
 
   // screen projection
-  const CX = 480, FAR_Y = 158, NEAR_Y = 522, VIEW_HW = 300, PPF = 8.4;
+  // Landscape court: the 44ft length runs ACROSS the screen, the 20ft width runs
+  // into it. P1 sits on the left, which keeps the left-half-of-screen touch zone
+  // pointing at the right player.
+  //
+  // This is an oblique (parallelogram) projection rather than a vanishing-point
+  // one on purpose: viewed straight down the length axis the net sits exactly
+  // edge-on and collapses to a zero-width line. SKX shears each depth row
+  // sideways so the net has real extent and the court reads as 3/4 view.
+  const CX = 480, GY0 = 348;
+  const KX = 17.2;    // px per foot along the court's length (screen horizontal)
+  const SKY = 12.5;   // px per foot across the court's width (screen vertical)
+  const SKX = 3.6;    // sideways shear per foot of depth
+  const PPF = 9.0;    // px per foot of ball height
+  const CROWD_Y = 168;
   function proj(x, y, z) {
-    const t = (y + HALF_L) / (2 * HALF_L);
-    const s = 0.50 + 0.50 * t;
-    const gy = FAR_Y + (NEAR_Y - FAR_Y) * (0.70 * t + 0.30 * t * t);
-    return { x: CX + (x / HALF_W) * VIEW_HW * s, y: gy - z * PPF * s, gy: gy, s: s };
+    const t = (x + HALF_W) / (2 * HALF_W);   // 0 = far sideline, 1 = near
+    const s = 0.88 + 0.24 * t;               // sprite scale only — positions stay linear
+    const gy = GY0 + x * SKY;
+    return { x: CX - y * KX + x * SKX, y: gy - z * PPF, gy: gy, s: s };
   }
 
   /* ---------------- options ---------------- */
@@ -1576,12 +1589,12 @@ const Art = (function () {
   function drawCourt() {
     // apron
     ctx.save();
-    const apron = [[-16.5, -27], [16.5, -27], [16.5, 27], [-16.5, 27]];
+    const apron = [[-12.5, -26], [12.5, -26], [12.5, 26], [-12.5, 26]];
     poly(apron, '#123f4a');
-    // hash texture
+    // hash texture, running along the court's length
     ctx.globalAlpha = .18;
-    for (let y = -26; y < 27; y += 4) {
-      const a = proj(-16.5, y, 0), b = proj(16.5, y, 0);
+    for (let x = -12; x < 12.5; x += 2.2) {
+      const a = proj(x, -26, 0), b = proj(x, 26, 0);
       ctx.strokeStyle = '#0a2a33'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
@@ -1670,7 +1683,7 @@ const Art = (function () {
   const SKIN = ['#f2c49b', '#8d5524'];
   function drawPlayer(p) {
     const q = proj(p.x, p.y, 0);
-    const s = q.s * 1.55;
+    const s = q.s * 1.35;
     const c1 = p.idx === 0 ? '#ff2e97' : '#8dff3a';
     const c2 = p.idx === 0 ? '#00f0ff' : '#ff8a1e';
     drawShadow(p.x, p.y, 0);
@@ -1700,7 +1713,7 @@ const Art = (function () {
     // arm + paddle
     const sw = p.swingT >= 0 ? clamp(p.swingT / 0.2, 0, 1) : (p.lunge > 0 ? 1 - p.lunge : 0);
     const armA = lerp(-0.9, 1.5, sw);
-    const side = ball.x > p.x ? 1 : -1;
+    const side = p.side;          // paddle faces the net, which is toward mid-screen
     ctx.save();
     ctx.translate(5 * side, -31 + bob);
     ctx.rotate(armA * side);
@@ -1779,14 +1792,15 @@ const Art = (function () {
 
   function drawScene() {
     Art.backdrop(ctx, W, H, S.t, opt.fx);
-    Art.crowd(ctx, W, S.t, FAR_Y - 6, opt.fx);
+    Art.crowd(ctx, W, S.t, CROWD_Y, opt.fx);
     drawCourt();
+    // depth is the court's WIDTH axis now, so sort on x, not y
     const ents = [];
-    ents.push({ y: pl[1].y, f: () => drawPlayer(pl[1]) });
-    ents.push({ y: pl[0].y, f: () => drawPlayer(pl[0]) });
-    ents.push({ y: 0, f: drawNet });
-    if (S.mode !== 'replay') ents.push({ y: ball.y, f: drawBall });
-    ents.sort((a, b) => a.y - b.y).forEach(e => e.f());
+    ents.push({ d: pl[1].x, f: () => drawPlayer(pl[1]) });
+    ents.push({ d: pl[0].x, f: () => drawPlayer(pl[0]) });
+    ents.push({ d: 0, f: drawNet });
+    if (S.mode !== 'replay') ents.push({ d: ball.x, f: drawBall });
+    ents.sort((a, b) => a.d - b.d).forEach(e => e.f());
     if (S.mode === 'replay') drawReplay();
   }
 
