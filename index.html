@@ -2106,6 +2106,7 @@ const Art = (function () {
     const lines = [
       ['ONE BUTTON. THAT IS THE WHOLE GAME.', '#ffe83d'],
       ['Your player runs to the ball on their own. You only swing.', '#fff'],
+      ['PLAYER 1 presses [A] or [UP ARROW].  PLAYER 2 presses [L] or [DOWN ARROW].', '#00f0ff'],
       ['', ''],
       ['ACCESS LEVEL — set this first', '#ffe83d'],
       ['EASIEST / EASY: the swing WAITS for the ball. Press whenever you', '#8dff3a'],
@@ -2118,7 +2119,7 @@ const Art = (function () {
       ['CLASSIC RULES — real pickleball: side-outs, kitchen, double bounce.', '#fff'],
       ['', ''],
       ['IN SETUP & ACCESS', '#ffe83d'],
-      ['Game speed, AUTO-PLAY HELP (swings for them if nobody presses),', '#fff'],
+      ['Game speed, AUTO-PLAY HELP (NO-FAIL only: swings if nobody presses),', '#fff'],
       ['and IGNORE FAST REPEATS for extra or involuntary presses.', '#fff'],
       ['', ''],
       ['[M] TUNES THE RADIO — 5 LIVE STATIONS', '#ffe83d'],
@@ -2126,7 +2127,7 @@ const Art = (function () {
     ];
     lines.forEach((l, i) => {
       if (!l[0]) return;
-      Art.label(ctx, l[0], 480, 100 + i * 24, l[1] === '#ffe83d' ? 22 : 18, l[1]);
+      Art.label(ctx, l[0], 480, 96 + i * 23, l[1] === '#ffe83d' ? 22 : 18, l[1]);
     });
     Art.label(ctx, 'HOLD your button to go back', 480, 572, 20, '#ff2e97');
   }
